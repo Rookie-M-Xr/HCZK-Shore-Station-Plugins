@@ -1,0 +1,7 @@
+{
+    "id": "com.hczk.shore.hello_service",
+    "name": "示例服务",
+    "version": "1.0.0",
+    "sdkVersion": "1.0",
+    "kind": "service"
+}

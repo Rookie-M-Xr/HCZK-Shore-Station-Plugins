@@ -1,0 +1,19 @@
+﻿# qmake / IDE
+*.pro.user
+*.pro.user.*
+.qtc_clangd/
+.qmake.stash
+Makefile
+Makefile.*
+
+# build outputs
+build/
+/debug/
+/release/
+*.dll
+*.a
+*.obj
+*.o
+*.moc
+moc_*.cpp
+qrc_*.cpp
