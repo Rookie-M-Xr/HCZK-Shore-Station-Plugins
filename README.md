@@ -1,6 +1,8 @@
 # 可选插件
 
-海图、船队、报警、视频是软件**主体**，源码在 `src/modules/`，编进 `shore_station.exe`。
+本仓库为 [HCZK-Shore-Station-Plugins](https://github.com/Rookie-M-Xr/HCZK-Shore-Station-Plugins)，在岸基主体工程里以 `plugins/` git submodule 引入，集中维护所有可选插件。
+
+海图、船队、报警、视频是软件**主体**，源码在主体仓库 `src/modules/`，编进 `shore_station.exe`。
 
 `plugins/` 只放**可选扩展**。卸掉本目录全部 DLL 后，主体四条主流程仍必须能用。
 
