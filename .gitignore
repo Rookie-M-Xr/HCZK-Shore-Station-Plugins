@@ -10,6 +10,7 @@ Makefile.*
 build/
 /debug/
 /release/
+**/run/
 *.dll
 *.a
 *.obj

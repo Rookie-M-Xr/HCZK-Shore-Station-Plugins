@@ -2,7 +2,7 @@
     "id": "com.hczk.shore.hello",
     "name": "Hello",
     "version": "1.0.0",
-    "sdkVersion": "1.0",
+    "sdkVersion": "1.1",
     "kind": "application",
     "icon": ":/hello_page/icon.svg"
 }

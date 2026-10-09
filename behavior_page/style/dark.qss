@@ -1,0 +1,230 @@
+QWidget#BehaviorPage {
+    background-color: #07141c;
+    color: #e5f0f5;
+}
+
+QFrame#behavior_toolbar,
+QFrame#behavior_card {
+    background-color: #0b1924;
+    border: 1px solid #28546a;
+    border-radius: 8px;
+}
+
+QFrame#behavior_toolbar QComboBox,
+QFrame#behavior_toolbar QDateTimeEdit,
+QFrame#behavior_toolbar QPushButton,
+QFrame#behavior_toolbar QToolButton {
+    min-height: 34px;
+    max-height: 34px;
+    padding: 0 8px 0 10px;
+    color: #e5f0f5;
+    background-color: #030a10;
+    border: 1px solid #1c3a4b;
+    border-radius: 6px;
+}
+
+QFrame#behavior_toolbar QPushButton,
+QFrame#behavior_toolbar QToolButton {
+    padding: 0 12px;
+    color: #91a9b6;
+}
+
+QFrame#behavior_toolbar QPushButton:hover,
+QFrame#behavior_toolbar QToolButton:hover {
+    color: #e5f0f5;
+    background-color: #0f2230;
+    border-color: #28546a;
+}
+
+QFrame#behavior_toolbar QPushButton:checked {
+    color: #82d7f2;
+    background-color: #132b3a;
+    border-color: #2b89ad;
+}
+
+QFrame#behavior_toolbar QComboBox:hover,
+QFrame#behavior_toolbar QComboBox:focus,
+QFrame#behavior_toolbar QDateTimeEdit:hover,
+QFrame#behavior_toolbar QDateTimeEdit:focus {
+    border-color: #2ba7d8;
+}
+
+QFrame#behavior_toolbar QComboBox::drop-down,
+QFrame#behavior_toolbar QDateTimeEdit::drop-down {
+    subcontrol-origin: border;
+    subcontrol-position: center right;
+    width: 32px;
+    border-left: 1px solid #1c3a4b;
+    border-top-right-radius: 5px;
+    border-bottom-right-radius: 5px;
+    background-color: #0f2230;
+}
+
+QFrame#behavior_toolbar QComboBox::drop-down:hover,
+QFrame#behavior_toolbar QDateTimeEdit::drop-down:hover {
+    background-color: #16435a;
+}
+
+QFrame#behavior_toolbar QDateTimeEdit::up-button,
+QFrame#behavior_toolbar QDateTimeEdit::down-button {
+    width: 0;
+    border: none;
+}
+
+QFrame#behavior_toolbar QComboBox QAbstractItemView {
+    color: #e5f0f5;
+    background-color: #0b1924;
+    selection-background-color: #16435a;
+    border: 1px solid #1c3a4b;
+    outline: 0;
+}
+
+QLabel#lb_title {
+    font-size: 16px;
+    font-weight: 600;
+    color: #e5f0f5;
+}
+
+QLabel#lb_empty {
+    color: #91a9b6;
+}
+
+QLabel#behavior_card_shot {
+    background-color: #02080c;
+    color: #91a9b6;
+    min-height: 150px;
+}
+
+QLabel#behavior_card_badge {
+    padding: 2px 6px;
+    color: #ffffff;
+    background-color: #e23b3b;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+QLabel#lb_ship {
+    font-size: 15px;
+    font-weight: 600;
+    color: #e5f0f5;
+}
+
+QLabel#lb_behavior {
+    color: #82d7f2;
+    font-weight: 600;
+}
+
+QLabel#lb_camera,
+QLabel#lb_position,
+QLabel#lb_time {
+    color: #91a9b6;
+}
+
+QWidget#behavior_lightbox {
+    background-color: rgba(2, 8, 12, 200);
+}
+
+QLabel#lb_lightbox_time,
+QLabel#lb_lightbox_caption {
+    color: #e5f0f5;
+}
+
+QLabel#lb_lightbox_time {
+    font-size: 18px;
+    font-weight: 600;
+}
+
+QFrame#behavior_strip_card {
+    background-color: #02080c;
+    border: 2px solid transparent;
+}
+
+QFrame#behavior_strip_card[on="true"] {
+    border-color: #e5f0f5;
+}
+
+QCalendarWidget {
+    background-color: #0b1924;
+    color: #e5f0f5;
+}
+
+QCalendarWidget QWidget {
+    background-color: #0b1924;
+    color: #e5f0f5;
+    alternate-background-color: #0b1924;
+}
+
+QCalendarWidget QWidget#qt_calendar_navigationbar {
+    background-color: #102433;
+}
+
+QCalendarWidget QToolButton {
+    color: #e5f0f5;
+    background-color: #102433;
+    border: none;
+    padding: 4px 8px;
+    font-weight: 600;
+}
+
+QCalendarWidget QToolButton:hover {
+    background-color: #1a3a4d;
+}
+
+QCalendarWidget QMenu {
+    background-color: #0b1924;
+    color: #e5f0f5;
+    border: 1px solid #28546a;
+}
+
+QCalendarWidget QSpinBox {
+    min-width: 64px;
+    min-height: 20px;
+    max-height: 22px;
+    margin: 0;
+    padding: 0 2px;
+    color: #e5f0f5;
+    background-color: #0b1924;
+    border: none;
+    selection-background-color: #1578a3;
+    selection-color: #ffffff;
+}
+
+QCalendarWidget QSpinBox::up-button,
+QCalendarWidget QSpinBox::down-button {
+    subcontrol-origin: border;
+    width: 14px;
+    height: 10px;
+    border: none;
+    background-color: #102433;
+}
+
+QCalendarWidget QSpinBox::up-button {
+    subcontrol-position: top right;
+}
+
+QCalendarWidget QSpinBox::down-button {
+    subcontrol-position: bottom right;
+}
+
+QCalendarWidget QSpinBox::up-button:hover,
+QCalendarWidget QSpinBox::down-button:hover {
+    background-color: #1a3a4d;
+}
+
+QCalendarWidget QSpinBox::up-arrow,
+QCalendarWidget QSpinBox::down-arrow {
+    width: 8px;
+    height: 5px;
+}
+
+QCalendarWidget QAbstractItemView {
+    background-color: #0b1924;
+    color: #e5f0f5;
+    selection-background-color: #1578a3;
+    selection-color: #ffffff;
+    outline: none;
+}
+
+QCalendarWidget QAbstractItemView:disabled {
+    color: #607d8b;
+}

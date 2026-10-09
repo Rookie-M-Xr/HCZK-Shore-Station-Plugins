@@ -1,0 +1,7 @@
+<RCC>
+    <qresource prefix="/behavior_page">
+        <file alias="icon.svg">icons/icon.svg</file>
+        <file alias="style/light.qss">style/light.qss</file>
+        <file alias="style/dark.qss">style/dark.qss</file>
+    </qresource>
+</RCC>

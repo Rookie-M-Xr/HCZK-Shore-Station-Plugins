@@ -8,13 +8,12 @@
 
 ## 构建
 
-在仓库根目录使用聚合工程，一次编出主体和 Hello 插件：
+岸基与插件分开编译，互不包含对方工程。当前验证套件是 Qt 6.11.1 + MSVC 2022 Release（见根目录 [README.md](../README.md)）。
 
-```powershell
-$env:PATH="D:\cache-QT6\Tools\mingw1310_64\bin;D:\cache-QT6\6.11.1\mingw_64\bin;$env:PATH"
-
-D:\cache-QT6\6.11.1\mingw_64\bin\qmake.exe shore.pro
-D:\cache-QT6\Tools\mingw1310_64\bin\mingw32-make.exe -j4
+```bat
+call D:\cache-Vs\VC\Auxiliary\Build\vcvars64.bat
+D:\cache-QT6\6.11.1\msvc2022_64\bin\qmake.exe shore.pro
+D:\cache-QT6\Tools\QtCreator\bin\jom\jom.exe -j8
 ```
 
 产物：
@@ -25,7 +24,13 @@ bin/plugins/hello_page.dll
 bin/plugins/hello_service.dll
 ```
 
-只编主体：`qmake shore_station.pro`。只编 Hello：进入 `plugins/hello_page` 再 `qmake hello_page.pro`。
+只编主体：`qmake shore_station.pro` 或 `qmake shore.pro`。只编插件：进入该插件目录再 qmake 它自己的 `.pro`。Hello 的 DLL：分别 qmake `plugins/hello_page/hello_page.pro` 与 `plugins/hello_service/hello_service.pro`。
+
+## 独立调试
+
+插件工程默认编成可执行程序，用 Qt Creator 打开后直接运行、下断点，不必启动岸基。要交给岸基加载时，给同一次 qmake 加上 `CONFIG+=shore_plugin`。DLL 目录由该插件 `.pro` 里的 `SHORE_PLUGIN_DIR` 决定，默认是岸基 exe 旁的 `bin/plugins`。岸基只在启动时扫描这个目录，不参与插件编译。
+
+行为识别：打开 `plugins/behavior_page/behavior_page.pro`。不附加参数时运行 `behavior_page_app`；调试数据在 exe 旁的 `behavior_page_debug`。菜单「样例」再追加一条记录。附加 `CONFIG+=shore_plugin` 后得到 `bin/plugins/behavior_page.dll`，岸基里使用的是同一套功能。
 
 ## 运行时如何加载
 
@@ -44,7 +49,7 @@ bin/plugins/hello_service.dll
 
 ## 你要完成 Hello 的验收步骤
 
-1. 按上面命令编译 `shore.pro`。
+1. 编译岸基 `shore_station.pro`，再分别编译 `hello_page.pro` 与 `hello_service.pro`。
 2. 确认 `bin/plugins/hello_page.dll` 与 `bin/plugins/hello_service.dll` 存在。
 3. 运行 `bin/shore_station.exe`。
 4. 顶栏打开插件管理中心：应看到「Hello」应用插件与「示例服务」服务插件。
@@ -62,8 +67,9 @@ bin/plugins/hello_service.dll
 3. 改 JSON 里同样的 id / 版本 / `kind`（`application` 或 `service`），并与 `Q_PLUGIN_METADATA FILE` 指向的 JSON 一致。可选 `icon`：填插件自己的 qrc 路径（如 `:/你的插件/icon.svg`）或相对 DLL 的文件路径，不要用岸基 `:/icons/`。未填则插件中心使用宿主 `default_plugin.svg`。
 4. 应用插件实现 `IPageProvider`，在 `initialize()` 成功返回前调用 `context.ui().addPage(*this)`。
 5. 服务插件实现 `IConfigProvider::configure()`，自己弹出配置界面；返回 true 表示参数已改，宿主会询问是否重启。
-6. 把新 `.pro` 加进根目录 `shore.pro` 的 `SUBDIRS`。
-7. 只链接 `plugin_sdk.pri`，不要 `include` 主体模块。
+6. 不要把插件工程加进 `shore.pro`。单独 qmake，DLL 会写到 `bin/plugins`，由岸基启动时加载。
+7. 需要脱离岸基运行时，同一个 `.pro` 默认编成程序；qmake 附加 `CONFIG+=shore_plugin` 则编成 DLL。不要再拆第二个工程。
+8. 只链接 `plugin_sdk.pri`，不要 `include` 主体模块。
 
 ## 禁止事项
 
