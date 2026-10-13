@@ -4,6 +4,7 @@
 #include "behavior_store.h"
 
 #include <algorithm>
+#include <memory>
 
 #include <QCoreApplication>
 #include <QDate>
@@ -53,25 +54,6 @@ int clampRetainDays(int days)
 int clampDownloadIntervalSec(int seconds)
 {
     return qBound(kMinDownloadIntervalSec, seconds, kMaxDownloadIntervalSec);
-}
-
-QJsonArray behaviorsToJson(const QVector<quint8> &behaviors)
-{
-    QJsonArray array;
-    for (quint8 type : behaviors) {
-        array.append(static_cast<int>(type));
-    }
-    return array;
-}
-
-QVector<quint8> behaviorsFromJson(const QJsonArray &array)
-{
-    QVector<quint8> behaviors;
-    behaviors.reserve(array.size());
-    for (const QJsonValue &value : array) {
-        behaviors.append(static_cast<quint8>(value.toInt()));
-    }
-    return behaviors;
 }
 
 QString sanitizeFileToken(const QString &text, const QString &fallback)
@@ -288,11 +270,13 @@ BehaviorStore::BehaviorStore(QObject *parent)
     , download_timer_(new QTimer(this))
     , cleanup_timer_(new QTimer(this))
     , fetch_timeout_(new QTimer(this))
+    , auto_pull_timer_(new QTimer(this))
 {
     download_timer_->setInterval(kDownloadIntervalMs);
     cleanup_timer_->setInterval(static_cast<int>(kDayMs));
     fetch_timeout_->setSingleShot(true);
     fetch_timeout_->setInterval(kFetchTimeoutMs);
+    auto_pull_timer_->setSingleShot(true);
     connect(download_timer_, &QTimer::timeout, this, [this]() {
         if (!fetching_) {
             fetchNext();
@@ -304,6 +288,9 @@ BehaviorStore::BehaviorStore(QObject *parent)
     });
     connect(fetch_timeout_, &QTimer::timeout, this, [this]() {
         onFetchTimeout();
+    });
+    connect(auto_pull_timer_, &QTimer::timeout, this, [this]() {
+        onAutoPull();
     });
 }
 
@@ -384,21 +371,11 @@ void BehaviorStore::start()
     }
     // 旧版本把报文记在配置目录，那不是设置，直接丢掉
     QFile::remove(QDir(defaultConfigDirectory()).filePath(QStringLiteral("index.json")));
-    loadIndex();
-    const bool imported = importLoosePictures();
-    const bool classified = classifyMockPictures();
-    const bool relocated = relocatePicturesIntoShipFolders();
-    if (imported || classified || relocated) {
-        rebuildIndexByKey();
-        saveIndex();
-        emit recordsChanged();
-    }
-    enqueuePending();
+    migrateLegacyPictures();
     cleanupExpired();
     download_timer_->start();
     cleanup_timer_->start();
-    schedulePump();
-    fetchNext();
+    restartAutoPullClock();
 }
 
 void BehaviorStore::stop()
@@ -406,45 +383,94 @@ void BehaviorStore::stop()
     download_timer_->stop();
     cleanup_timer_->stop();
     fetch_timeout_->stop();
+    auto_pull_timer_->stop();
+    next_auto_pull_due_ms_ = 0;
     started_ = false;
     clearInFlight();
     ++fetch_generation_;
+    ++query_generation_;
     if (QCoreApplication::instance() != nullptr) {
         QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
         QCoreApplication::processEvents();
     }
 }
 
-void BehaviorStore::ingest(const BehaviorFrame &frame)
+void BehaviorStore::ingestHostEvent(const plugin_sdk::BehaviorEvent &event, const QString &ship_name)
 {
-    const QString key = recordKey(frame.ship_id, frame.message_id);
-    if (index_by_key_.contains(key)) {
+    const QString key = recordKey(event.ship_id, event.message_id);
+    const int existing = index_by_key_.value(key, -1);
+    BehaviorRecord record;
+    if (existing >= 0 && existing < records_.size()) {
+        record = records_.at(existing);
+    } else {
+        record.ship_id = event.ship_id;
+        record.message_id = event.message_id;
+    }
+    record.ship_name = shipDisplayName(event.ship_id, ship_name);
+    record.camera_id = event.camera_id;
+    record.camera_name = event.camera_name;
+    record.timestamp_ms = event.timestamp_ms;
+    record.image_url = event.source_url;
+    record.behaviors = event.behaviors;
+    if (record.behaviors.isEmpty()) {
+        record.behaviors = {kBehaviorUnknown};
+    }
+
+    if (!event.image.isEmpty()) {
+        ensureDirectories();
+        QString suffix = fileSuffixForUrl(event.source_url);
+        if (event.mime.contains(QLatin1String("png"), Qt::CaseInsensitive)) {
+            suffix = QStringLiteral(".png");
+        } else if (event.mime.contains(QLatin1String("webp"), Qt::CaseInsensitive)) {
+            suffix = QStringLiteral(".webp");
+        }
+        const QString path =
+            QFileInfo(QDir(pictureDirectory()).filePath(imageRelativePath(record, suffix)))
+                .absoluteFilePath();
+        QDir().mkpath(QFileInfo(path).absolutePath());
+        const QString temp_path = path + QStringLiteral(".tmp");
+        QFile file(temp_path);
+        if (file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            file.write(event.image);
+            file.close();
+            QFile::remove(path);
+            if (QFile::rename(temp_path, path)) {
+                record.local_path = path;
+            } else {
+                QFile::remove(temp_path);
+            }
+        }
+    }
+    attachCachedPath(&record);
+
+    if (existing >= 0 && existing < records_.size()) {
+        const QString old_path = records_[existing].local_path;
+        records_[existing] = record;
+        if (record.local_path != old_path && !record.local_path.isEmpty()) {
+            emit recordImageReady(record.ship_id, record.message_id);
+        }
+        return;
+    }
+    if (!page_visible_ || !inCurrentWindow(record)) {
         return;
     }
 
-    BehaviorRecord record;
-    record.ship_id = frame.ship_id;
-    record.ship_name = frame.ship_name;
-    record.message_id = frame.message_id;
-    record.camera_id = frame.camera_id;
-    record.camera_name = frame.camera_name;
-    record.position = frame.position;
-    record.timestamp_ms = frame.timestamp_ms;
-    record.image_url = frame.image_url;
-    record.behaviors = frame.behaviors;
     records_.prepend(record);
-    index_by_key_.insert(key, 0);
-    for (int index = 1; index < records_.size(); ++index) {
-        const BehaviorRecord &item = records_.at(index);
-        index_by_key_.insert(recordKey(item.ship_id, item.message_id), index);
-    }
-    enqueueIfNeeded(key, true);
-    saveIndex();
+    rebuildIndexByKey();
     emit recordsChanged();
-    if (started_) {
-        schedulePump();
-        fetchNext();
-    }
+}
+
+void BehaviorStore::ingest(const BehaviorFrame &frame)
+{
+    plugin_sdk::BehaviorEvent event;
+    event.ship_id = frame.ship_id;
+    event.message_id = frame.message_id;
+    event.camera_id = frame.camera_id;
+    event.camera_name = frame.camera_name;
+    event.timestamp_ms = frame.timestamp_ms;
+    event.source_url = frame.image_url;
+    event.behaviors = frame.behaviors;
+    ingestHostEvent(event, frame.ship_name);
 }
 
 QVector<BehaviorRecord> BehaviorStore::records() const
@@ -500,6 +526,382 @@ void BehaviorStore::setDownloadIntervalSec(int seconds)
     pump_cap_ms_ = download_interval_sec_ * 1000;
     saveSettings();
     schedulePump();
+    restartAutoPullClock();
+}
+
+bool BehaviorStore::autoRefresh() const
+{
+    return auto_refresh_;
+}
+
+void BehaviorStore::setAutoRefresh(bool enabled)
+{
+    if (auto_refresh_ == enabled) {
+        restartAutoPullClock();
+        return;
+    }
+    auto_refresh_ = enabled;
+    saveSettings();
+    restartAutoPullClock();
+}
+
+void BehaviorStore::setRemoteRefresh(std::function<void()> refresh)
+{
+    remote_refresh_ = std::move(refresh);
+}
+
+void BehaviorStore::setShipNameQuery(std::function<QString(quint32)> query)
+{
+    ship_name_query_ = std::move(query);
+}
+
+void BehaviorStore::setKnownShipsQuery(std::function<QVector<quint32>()> query)
+{
+    known_ships_query_ = std::move(query);
+}
+
+void BehaviorStore::setLog(std::function<void(const QString &)> info,
+                           std::function<void(const QString &)> warning)
+{
+    log_info_ = std::move(info);
+    log_warn_ = std::move(warning);
+}
+
+void BehaviorStore::logInfo(const QString &message) const
+{
+    if (log_info_) {
+        log_info_(message);
+    }
+}
+
+void BehaviorStore::logWarn(const QString &message) const
+{
+    if (log_warn_) {
+        log_warn_(message);
+    }
+}
+
+QVector<quint32> BehaviorStore::knownShipIds() const
+{
+    QVector<quint32> ships;
+    if (known_ships_query_) {
+        ships = known_ships_query_();
+    }
+    for (const plugin_sdk::HostCamera &camera : hostCameras()) {
+        if (camera.ship_id != 0 && !ships.contains(camera.ship_id)) {
+            ships.append(camera.ship_id);
+        }
+    }
+    return ships;
+}
+
+QString BehaviorStore::displayShipName(quint32 ship_id) const
+{
+    return shipDisplayName(ship_id, {});
+}
+
+void BehaviorStore::setQueryWindow(qint64 from_ms, qint64 to_ms, quint32 ship_id)
+{
+    window_from_ms_ = from_ms;
+    window_to_ms_ = to_ms;
+    window_ship_id_ = ship_id;
+}
+
+void BehaviorStore::setPageVisible(bool visible)
+{
+    page_visible_ = visible;
+    if (!visible) {
+        cancelPageFetches();
+    }
+}
+
+void BehaviorStore::cancelPageFetches()
+{
+    ++fetch_generation_;
+    pending_.clear();
+    page_fetch_signature_.clear();
+    clearInFlight();
+}
+
+QVector<quint32> BehaviorStore::queryShipIds() const
+{
+    QVector<quint32> ships;
+    if (window_ship_id_ != 0) {
+        ships.append(window_ship_id_);
+        return ships;
+    }
+    return knownShipIds();
+}
+
+QString BehaviorStore::shipDisplayName(quint32 ship_id, const QString &fallback) const
+{
+    if (ship_name_query_) {
+        const QString name = ship_name_query_(ship_id);
+        if (!name.isEmpty()) {
+            return name;
+        }
+    }
+    if (!fallback.isEmpty()) {
+        return fallback;
+    }
+    return QString::number(ship_id);
+}
+
+bool BehaviorStore::inCurrentWindow(const BehaviorRecord &record) const
+{
+    if (window_from_ms_ > 0 && record.timestamp_ms < window_from_ms_) {
+        return false;
+    }
+    if (window_to_ms_ > 0 && record.timestamp_ms > window_to_ms_) {
+        return false;
+    }
+    if (window_ship_id_ != 0 && record.ship_id != window_ship_id_) {
+        return false;
+    }
+    return true;
+}
+
+BehaviorRecord BehaviorStore::recordFromInfo(const plugin_sdk::BehaviorEventInfo &info) const
+{
+    BehaviorRecord record;
+    record.ship_id = info.ship_id;
+    record.ship_name = shipDisplayName(info.ship_id, {});
+    record.message_id = info.message_id;
+    record.camera_id = info.camera_id;
+    record.camera_name = info.camera_name;
+    record.timestamp_ms = info.timestamp_ms;
+    record.image_url = info.source_url;
+    record.behaviors = info.behaviors;
+    if (record.behaviors.isEmpty()) {
+        record.behaviors = {kBehaviorUnknown};
+    }
+    attachCachedPath(&record);
+    return record;
+}
+
+void BehaviorStore::attachCachedPath(BehaviorRecord *record) const
+{
+    if (record == nullptr || !record->local_path.isEmpty()) {
+        return;
+    }
+    record->local_path = findCachedImage(*record);
+}
+
+QString BehaviorStore::findCachedImage(const BehaviorRecord &record) const
+{
+    const QStringList suffixes = {QStringLiteral(".jpg"),
+                                  QStringLiteral(".jpeg"),
+                                  QStringLiteral(".png"),
+                                  QStringLiteral(".webp")};
+    for (const QString &suffix : suffixes) {
+        const QString path =
+            QFileInfo(QDir(pictureDirectory()).filePath(imageRelativePath(record, suffix)))
+                .absoluteFilePath();
+        if (QFileInfo::exists(path)) {
+            return path;
+        }
+    }
+    return {};
+}
+
+void BehaviorStore::queryCurrentWindow()
+{
+    if (!started_ || !page_visible_ || cloud_blob_ == nullptr) {
+        logWarn(QStringLiteral("查询跳过 started=%1 visible=%2 blob=%3")
+                    .arg(started_ ? 1 : 0)
+                    .arg(page_visible_ ? 1 : 0)
+                    .arg(cloud_blob_ != nullptr ? 1 : 0));
+        return;
+    }
+    const int generation = ++query_generation_;
+    const QVector<quint32> ships = queryShipIds();
+    QStringList ship_texts;
+    for (quint32 ship_id : ships) {
+        ship_texts.append(QString::number(ship_id));
+    }
+    logInfo(QStringLiteral("查询窗口 船=[%1] 从=%2 到=%3")
+                .arg(ship_texts.join(QLatin1Char(',')))
+                .arg(window_from_ms_)
+                .arg(window_to_ms_));
+    if (ships.isEmpty()) {
+        logWarn(QStringLiteral("查询跳过 无已知船舶"));
+        applyQueryResults({}, generation);
+        return;
+    }
+    auto remaining = std::make_shared<int>(ships.size());
+    auto collected = std::make_shared<QVector<BehaviorRecord>>();
+    for (quint32 ship_id : ships) {
+        plugin_sdk::BehaviorEventQuery query;
+        query.ship_id = ship_id;
+        query.ts_from_ms = window_from_ms_;
+        query.ts_to_ms = window_to_ms_;
+        query.limit = 2000;
+        cloud_blob_->queryEvents(query, [this, generation, remaining, collected, ship_id](
+                                            plugin_sdk::BehaviorEventQueryResult result) {
+            if (generation != query_generation_) {
+                return;
+            }
+            if (!result.error.isEmpty()) {
+                logWarn(QStringLiteral("查询事件失败 船=%1 %2").arg(ship_id).arg(result.error));
+            } else {
+                logInfo(QStringLiteral("查询事件 船=%1 条数=%2%3")
+                            .arg(ship_id)
+                            .arg(result.events.size())
+                            .arg(result.truncated ? QStringLiteral(" 已截断") : QString()));
+            }
+            for (const plugin_sdk::BehaviorEventInfo &info : result.events) {
+                collected->append(recordFromInfo(info));
+            }
+            --*remaining;
+            if (*remaining > 0) {
+                return;
+            }
+            applyQueryResults(*collected, generation);
+        });
+    }
+}
+
+void BehaviorStore::applyQueryResults(QVector<BehaviorRecord> events, int generation)
+{
+    if (generation != query_generation_) {
+        return;
+    }
+    QHash<QString, int> live_keep;
+    QVector<BehaviorRecord> merged;
+    for (BehaviorRecord &event : events) {
+        attachCachedPath(&event);
+        const QString key = recordKey(event.ship_id, event.message_id);
+        if (live_keep.contains(key)) {
+            continue;
+        }
+        live_keep.insert(key, merged.size());
+        merged.append(event);
+    }
+    for (const BehaviorRecord &live : records_) {
+        const QString key = recordKey(live.ship_id, live.message_id);
+        if (live_keep.contains(key) || !inCurrentWindow(live)) {
+            continue;
+        }
+        live_keep.insert(key, merged.size());
+        merged.append(live);
+    }
+    std::sort(merged.begin(), merged.end(), [](const BehaviorRecord &left, const BehaviorRecord &right) {
+        return left.timestamp_ms > right.timestamp_ms;
+    });
+    QStringList previous_keys;
+    previous_keys.reserve(records_.size());
+    QHash<QString, QString> previous_paths;
+    previous_paths.reserve(records_.size());
+    for (const BehaviorRecord &item : records_) {
+        const QString key = recordKey(item.ship_id, item.message_id);
+        previous_keys.append(key);
+        previous_paths.insert(key, item.local_path);
+    }
+    QStringList next_keys;
+    next_keys.reserve(merged.size());
+    for (const BehaviorRecord &item : merged) {
+        next_keys.append(recordKey(item.ship_id, item.message_id));
+    }
+    records_ = std::move(merged);
+    rebuildIndexByKey();
+    if (previous_keys == next_keys) {
+        for (const BehaviorRecord &item : records_) {
+            const QString key = recordKey(item.ship_id, item.message_id);
+            if (item.local_path != previous_paths.value(key) && !item.local_path.isEmpty()) {
+                emit recordImageReady(item.ship_id, item.message_id);
+            }
+        }
+        emit queryFinished();
+        return;
+    }
+    logInfo(QStringLiteral("清单已更新 条数=%1").arg(records_.size()));
+    emit recordsChanged();
+    emit queryFinished();
+}
+
+void BehaviorStore::requestPageImages(const QVector<BehaviorRecord> &page)
+{
+    if (!started_ || !page_visible_) {
+        return;
+    }
+    QStringList keys;
+    keys.reserve(page.size());
+    for (const BehaviorRecord &record : page) {
+        keys.append(recordKey(record.ship_id, record.message_id));
+    }
+    const QString signature = keys.join(QLatin1Char(','));
+    if (signature != page_fetch_signature_) {
+        cancelPageFetches();
+        page_fetch_signature_ = signature;
+    }
+    for (const BehaviorRecord &record : page) {
+        const QString key = recordKey(record.ship_id, record.message_id);
+        const int index = index_by_key_.value(key, -1);
+        if (index < 0 || index >= records_.size()) {
+            continue;
+        }
+        attachCachedPath(&records_[index]);
+        if (!records_[index].local_path.isEmpty() && QFileInfo::exists(records_[index].local_path)) {
+            continue;
+        }
+        enqueueIfNeeded(key, false);
+    }
+    logInfo(QStringLiteral("当前页取图 卡片=%1 排队=%2")
+                .arg(page.size())
+                .arg(pending_.size() + (fetching_ ? 1 : 0)));
+    fetchNext();
+}
+
+bool BehaviorStore::isFetching(quint32 ship_id, quint32 message_id) const
+{
+    const QString key = recordKey(ship_id, message_id);
+    if (fetching_ && fetching_item_.key == key) {
+        return true;
+    }
+    return pendingIndex(key) >= 0;
+}
+
+qint64 BehaviorStore::nextAutoPullDueMs() const
+{
+    if (!auto_refresh_ || !started_) {
+        return 0;
+    }
+    return next_auto_pull_due_ms_;
+}
+
+void BehaviorStore::refreshNow()
+{
+    if (remote_refresh_) {
+        remote_refresh_();
+    }
+    if (page_visible_) {
+        queryCurrentWindow();
+    }
+    restartAutoPullClock();
+}
+
+void BehaviorStore::onAutoPull()
+{
+    if (!started_ || !auto_refresh_) {
+        return;
+    }
+    refreshNow();
+}
+
+void BehaviorStore::restartAutoPullClock()
+{
+    if (!started_ || !auto_refresh_) {
+        if (auto_pull_timer_ != nullptr) {
+            auto_pull_timer_->stop();
+        }
+        next_auto_pull_due_ms_ = 0;
+        emit pullScheduleChanged();
+        return;
+    }
+    const int ms = pumpCapMs();
+    next_auto_pull_due_ms_ = nowMs() + ms;
+    auto_pull_timer_->start(ms);
+    emit pullScheduleChanged();
 }
 
 QString BehaviorStore::pictureDirectory() const
@@ -545,6 +947,7 @@ void BehaviorStore::loadSettings()
     download_interval_sec_ = clampDownloadIntervalSec(
         root.value(QStringLiteral("download_interval_sec")).toInt(kDefaultDownloadIntervalSec));
     pump_cap_ms_ = download_interval_sec_ * 1000;
+    auto_refresh_ = root.value(QStringLiteral("auto_refresh")).toBool(true);
 }
 
 void BehaviorStore::saveSettings() const
@@ -554,6 +957,7 @@ void BehaviorStore::saveSettings() const
     root.insert(QStringLiteral("retain_days"), retain_days_);
     root.insert(QStringLiteral("picture_path"), custom_picture_path_);
     root.insert(QStringLiteral("download_interval_sec"), download_interval_sec_);
+    root.insert(QStringLiteral("auto_refresh"), auto_refresh_);
     QFile file(settingsFilePath());
     if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
         return;
@@ -561,59 +965,42 @@ void BehaviorStore::saveSettings() const
     file.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
 }
 
-void BehaviorStore::loadIndex()
+void BehaviorStore::migrateLegacyPictures()
 {
-    records_.clear();
-    index_by_key_.clear();
     QFile file(indexFilePath());
     if (!file.open(QIODevice::ReadOnly)) {
         return;
     }
     const QJsonDocument document = QJsonDocument::fromJson(file.readAll());
+    file.close();
     const QJsonArray array = document.object().value(QStringLiteral("records")).toArray();
     for (const QJsonValue &value : array) {
         const QJsonObject object = value.toObject();
         BehaviorRecord record;
         record.ship_id = static_cast<quint32>(object.value(QStringLiteral("ship_id")).toDouble());
-        record.ship_name = object.value(QStringLiteral("ship_name")).toString();
         record.message_id = static_cast<quint32>(object.value(QStringLiteral("message_id")).toDouble());
-        record.camera_id = static_cast<quint16>(object.value(QStringLiteral("camera_id")).toInt());
-        record.camera_name = object.value(QStringLiteral("camera_name")).toString();
-        record.position = object.value(QStringLiteral("position")).toString();
         record.timestamp_ms = static_cast<qint64>(object.value(QStringLiteral("timestamp_ms")).toDouble());
         record.image_url = object.value(QStringLiteral("image_url")).toString();
-        record.behaviors = behaviorsFromJson(object.value(QStringLiteral("behaviors")).toArray());
-        record.local_path = object.value(QStringLiteral("local_path")).toString();
-        records_.append(record);
-        index_by_key_.insert(recordKey(record.ship_id, record.message_id), records_.size() - 1);
+        const QString old_path = object.value(QStringLiteral("local_path")).toString();
+        if (record.message_id == 0 || old_path.isEmpty() || !QFileInfo::exists(old_path)) {
+            continue;
+        }
+        QString suffix = QFileInfo(old_path).suffix();
+        if (suffix.isEmpty()) {
+            suffix = fileSuffixForUrl(record.image_url);
+        } else {
+            suffix = QLatin1Char('.') + suffix.toLower();
+        }
+        const QString dest =
+            QFileInfo(QDir(pictureDirectory()).filePath(imageRelativePath(record, suffix)))
+                .absoluteFilePath();
+        if (sameAbsolutePath(old_path, dest) || QFileInfo::exists(dest)) {
+            continue;
+        }
+        QDir().mkpath(QFileInfo(dest).absolutePath());
+        QFile::copy(old_path, dest);
     }
-}
-
-void BehaviorStore::saveIndex() const
-{
-    ensureDirectories();
-    QJsonArray array;
-    for (const BehaviorRecord &record : records_) {
-        QJsonObject object;
-        object.insert(QStringLiteral("ship_id"), static_cast<double>(record.ship_id));
-        object.insert(QStringLiteral("ship_name"), record.ship_name);
-        object.insert(QStringLiteral("message_id"), static_cast<double>(record.message_id));
-        object.insert(QStringLiteral("camera_id"), static_cast<int>(record.camera_id));
-        object.insert(QStringLiteral("camera_name"), record.camera_name);
-        object.insert(QStringLiteral("position"), record.position);
-        object.insert(QStringLiteral("timestamp_ms"), static_cast<double>(record.timestamp_ms));
-        object.insert(QStringLiteral("image_url"), record.image_url);
-        object.insert(QStringLiteral("behaviors"), behaviorsToJson(record.behaviors));
-        object.insert(QStringLiteral("local_path"), record.local_path);
-        array.append(object);
-    }
-    QJsonObject root;
-    root.insert(QStringLiteral("records"), array);
-    QFile file(indexFilePath());
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-        return;
-    }
-    file.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+    QFile::remove(indexFilePath());
 }
 
 qint64 BehaviorStore::nowMs() const
@@ -662,16 +1049,6 @@ void BehaviorStore::enqueueIfNeeded(const QString &key, bool delay_first)
     item.next_at_ms = delay_first ? now + kFirstFetchDelayMs : now;
     item.attempts = 0;
     pending_.append(item);
-}
-
-void BehaviorStore::enqueuePending()
-{
-    pending_.clear();
-    for (const BehaviorRecord &record : records_) {
-        if (record.local_path.isEmpty() || !QFileInfo::exists(record.local_path)) {
-            enqueueIfNeeded(recordKey(record.ship_id, record.message_id), false);
-        }
-    }
 }
 
 void BehaviorStore::clearInFlight()
@@ -764,6 +1141,7 @@ void BehaviorStore::fetchNext()
     fetching_item_ = item;
     fetch_timeout_->start();
     const int generation = fetch_generation_;
+    logInfo(QStringLiteral("开始取图 船=%1 消息=%2").arg(record.ship_id).arg(record.message_id));
     plugin_sdk::CloudBlobKey blob_key;
     blob_key.ship_id = record.ship_id;
     blob_key.message_id = record.message_id;
@@ -793,11 +1171,20 @@ void BehaviorStore::finishFetch(PendingFetch item,
     if (result.status == plugin_sdk::CloudBlobStatus::NotReady
         || result.bytes.isEmpty()
         || result.status != plugin_sdk::CloudBlobStatus::Ok) {
+        const BehaviorRecord &record = records_[index];
         if (result.status == plugin_sdk::CloudBlobStatus::Failed) {
+            logWarn(QStringLiteral("取图失败 船=%1 消息=%2 %3")
+                        .arg(record.ship_id)
+                        .arg(record.message_id)
+                        .arg(result.error));
             schedulePump();
             fetchNext();
             return;
         }
+        logInfo(QStringLiteral("取图未就绪 船=%1 消息=%2 %3")
+                    .arg(record.ship_id)
+                    .arg(record.message_id)
+                    .arg(result.error));
         requeueNotReady(std::move(item));
         schedulePump();
         fetchNext();
@@ -807,7 +1194,9 @@ void BehaviorStore::finishFetch(PendingFetch item,
     ensureDirectories();
     BehaviorRecord &record = records_[index];
     const QString suffix = fileSuffixForUrl(record.image_url);
-    const QString path = resolveImagePath(record, suffix, record.local_path);
+    const QString path =
+        QFileInfo(QDir(pictureDirectory()).filePath(imageRelativePath(record, suffix)))
+            .absoluteFilePath();
     QDir().mkpath(QFileInfo(path).absolutePath());
     const QString temp_path = path + QStringLiteral(".tmp");
     QFile file(temp_path);
@@ -829,41 +1218,48 @@ void BehaviorStore::finishFetch(PendingFetch item,
     }
 
     record.local_path = path;
-    saveIndex();
-    emit recordsChanged();
+    logInfo(QStringLiteral("取图完成 船=%1 消息=%2 字节=%3")
+                .arg(record.ship_id)
+                .arg(record.message_id)
+                .arg(result.bytes.size()));
+    emit recordImageReady(record.ship_id, record.message_id);
     fetchNext();
 }
 
 void BehaviorStore::cleanupExpired()
 {
+    const QDate cutoff = QDate::currentDate().addDays(-retain_days_);
+    QDir root(pictureDirectory());
+    if (root.exists()) {
+        const QFileInfoList ships = root.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot);
+        for (const QFileInfo &ship : ships) {
+            QDir ship_dir(ship.absoluteFilePath());
+            const QFileInfoList days = ship_dir.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot);
+            for (const QFileInfo &day : days) {
+                const QDate date = QDate::fromString(day.fileName(), QStringLiteral("yyyyMMdd"));
+                if (!date.isValid() || date >= cutoff) {
+                    continue;
+                }
+                QDir(day.absoluteFilePath()).removeRecursively();
+            }
+            removeEmptyPictureDir(ship.absoluteFilePath());
+        }
+    }
     const qint64 expire_before =
-        QDateTime::currentMSecsSinceEpoch() - static_cast<qint64>(retain_days_) * kDayMs;
+        QDateTime(cutoff, QTime(0, 0, 0), QTimeZone::systemTimeZone()).toMSecsSinceEpoch();
     QVector<BehaviorRecord> kept;
     kept.reserve(records_.size());
-    bool changed = false;
     for (const BehaviorRecord &record : records_) {
         if (record.timestamp_ms > 0 && record.timestamp_ms < expire_before) {
-            if (!record.local_path.isEmpty()) {
-                const QString directory = QFileInfo(record.local_path).absolutePath();
-                QFile::remove(record.local_path);
-                removeEmptyPictureDir(directory);
-            }
-            const QString key = recordKey(record.ship_id, record.message_id);
-            const int pending_at = pendingIndex(key);
-            if (pending_at >= 0) {
-                pending_.removeAt(pending_at);
-            }
-            changed = true;
             continue;
         }
         kept.append(record);
     }
-    if (!changed) {
+    if (kept.size() == records_.size()) {
         return;
     }
     records_ = kept;
     rebuildIndexByKey();
-    saveIndex();
     emit recordsChanged();
 }
 
@@ -880,11 +1276,13 @@ QString BehaviorStore::imageRelativePath(const BehaviorRecord &record, const QSt
 {
     const QDateTime local =
         QDateTime::fromMSecsSinceEpoch(record.timestamp_ms, QTimeZone::UTC).toLocalTime();
-    const QString stamp = local.isValid() ? local.toString(QStringLiteral("yyyyMMdd_HHmmss"))
-                                           : QStringLiteral("00000000_000000");
-    const QString file_name = QStringLiteral("%1_%2_%3%4")
-                                  .arg(cameraFileToken(record), stamp, behaviorFileTag(record.behaviors), suffix);
-    return QDir(shipFolderName(record)).filePath(file_name);
+    const QString day = local.isValid() ? local.toString(QStringLiteral("yyyyMMdd"))
+                                        : QStringLiteral("00000000");
+    return QStringLiteral("%1/%2/%3%4")
+        .arg(record.ship_id)
+        .arg(day)
+        .arg(record.message_id)
+        .arg(suffix);
 }
 
 QString BehaviorStore::resolveImagePath(const BehaviorRecord &record,

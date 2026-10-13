@@ -3,11 +3,9 @@
 
 #include "behavior_page_plugin.h"
 
-#include <QByteArray>
 #include <QVector>
 #include <QWidget>
 
-#include "behavior_codec.h"
 #include "behavior_page_widget.h"
 #include "behavior_store.h"
 #include "i_plugin_context.h"
@@ -51,13 +49,7 @@ plugin_sdk::PluginResult BehaviorPagePlugin::initialize(plugin_sdk::IPluginConte
         store_ = new BehaviorStore(this);
     }
     store_->setDataRoot(pluginDataRoot());
-    store_->setCloudBlob(&context.cloudBlob());
-    store_->setCameraQuery([this]() {
-        if (this->context() == nullptr) {
-            return QVector<plugin_sdk::HostCamera>{};
-        }
-        return this->context()->cameras();
-    });
+    bindHost(context);
     context.ui().addPage(*this);
     context.log().info(descriptor().id, QStringLiteral("已注册行为识别页面"));
     return plugin_sdk::PluginResult::success();
@@ -73,7 +65,7 @@ plugin_sdk::PluginResult BehaviorPagePlugin::start()
         return plugin_sdk::PluginResult::failure(QStringLiteral("插件未初始化"));
     }
     store_->start();
-    context()->hczk().subscribe(*this);
+    context()->behaviorFeed().subscribe(*this);
     context()->log().info(descriptor().id, QStringLiteral("start"));
     return plugin_sdk::PluginResult::success();
 }
@@ -81,11 +73,15 @@ plugin_sdk::PluginResult BehaviorPagePlugin::start()
 void BehaviorPagePlugin::stop() noexcept
 {
     if (context() != nullptr) {
-        context()->hczk().unsubscribe(*this);
+        context()->behaviorFeed().unsubscribe(*this);
         context()->log().info(descriptor().id, QStringLiteral("stop"));
     }
     if (store_ != nullptr) {
         store_->setCameraQuery({});
+        store_->setKnownShipsQuery({});
+        store_->setShipNameQuery({});
+        store_->setLog({}, {});
+        store_->setRemoteRefresh({});
         store_->setCloudBlob(nullptr);
         store_->stop();
     }
@@ -97,6 +93,7 @@ plugin_sdk::PageDescriptor BehaviorPagePlugin::pageDescriptor() const
     plugin_sdk::PageDescriptor descriptor;
     descriptor.id = QStringLiteral("behavior.main");
     descriptor.title = tr("行为识别");
+    descriptor.icon = QStringLiteral("behavior_nav");
     return descriptor;
 }
 
@@ -106,7 +103,7 @@ QWidget *BehaviorPagePlugin::createPage(QWidget *parent)
         store_ = new BehaviorStore(this);
         store_->setDataRoot(pluginDataRoot());
         if (context() != nullptr) {
-            store_->setCloudBlob(&context()->cloudBlob());
+            bindHost(*context());
         }
     }
     auto *page = new BehaviorPageWidget(*store_, parent);
@@ -117,23 +114,53 @@ QWidget *BehaviorPagePlugin::createPage(QWidget *parent)
     return page;
 }
 
-void BehaviorPagePlugin::onHczkPayload(quint16 cmd, quint32 send_id, const QByteArray &payload)
+void BehaviorPagePlugin::bindHost(plugin_sdk::IPluginContext &context)
 {
-    if (cmd != kHczkCmdBehaviorResult || store_ == nullptr) {
+    store_->setCloudBlob(&context.cloudBlob());
+    store_->setCameraQuery([this]() {
+        if (this->context() == nullptr) {
+            return QVector<plugin_sdk::HostCamera>{};
+        }
+        return this->context()->cameras();
+    });
+    store_->setKnownShipsQuery([this]() {
+        if (this->context() == nullptr) {
+            return QVector<quint32>{};
+        }
+        return this->context()->knownShips();
+    });
+    store_->setShipNameQuery([this](quint32 ship_id) {
+        if (this->context() == nullptr) {
+            return QString::number(ship_id);
+        }
+        return this->context()->shipName(ship_id);
+    });
+    const QString plugin_id = descriptor().id;
+    store_->setLog(
+        [this, plugin_id](const QString &message) {
+            if (this->context() != nullptr) {
+                this->context()->log().info(plugin_id, message);
+            }
+        },
+        [this, plugin_id](const QString &message) {
+            if (this->context() != nullptr) {
+                this->context()->log().warning(plugin_id, message);
+            }
+        });
+    store_->setRemoteRefresh([this]() {
+        if (this->context() != nullptr) {
+            this->context()->behaviorFeed().requestPull();
+        }
+    });
+}
+
+void BehaviorPagePlugin::onBehaviorEvent(const plugin_sdk::BehaviorEvent &event)
+{
+    if (store_ == nullptr) {
         return;
     }
-    BehaviorFrame frame;
-    QString error;
-    if (!parseBehaviorPayload(payload, &frame, &error)) {
-        return;
-    }
-    frame.ship_id = send_id;
-    if (context() != nullptr) {
-        frame.ship_name = context()->shipName(send_id);
-    } else {
-        frame.ship_name = QString::number(send_id);
-    }
-    store_->ingest(frame);
+    store_->ingestHostEvent(event, context() != nullptr ? context()->shipName(event.ship_id)
+                                                        : QString::number(event.ship_id));
 }
 
 void BehaviorPagePlugin::onThemeChanged(const QString &theme)
