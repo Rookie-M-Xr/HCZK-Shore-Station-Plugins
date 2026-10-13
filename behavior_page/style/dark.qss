@@ -79,6 +79,21 @@ QFrame#behavior_toolbar QComboBox QAbstractItemView {
     outline: 0;
 }
 
+QFrame#behavior_toolbar QCheckBox#ckb_auto_refresh {
+    min-height: 34px;
+    max-height: 34px;
+    spacing: 6px;
+    color: #e5f0f5;
+    background: transparent;
+    border: none;
+}
+
+QLabel#lb_countdown {
+    min-width: 42px;
+    color: #e23b3b;
+    font-weight: 600;
+}
+
 QLabel#lb_title {
     font-size: 16px;
     font-weight: 600;
@@ -89,16 +104,61 @@ QLabel#lb_empty {
     color: #91a9b6;
 }
 
+QFrame#behavior_pager QPushButton {
+    min-height: 34px;
+    max-height: 34px;
+    min-width: 72px;
+    padding: 0 12px;
+    color: #91a9b6;
+    background-color: #030a10;
+    border: 1px solid #1c3a4b;
+    border-radius: 6px;
+}
+
+QFrame#behavior_pager QPushButton:hover {
+    color: #e5f0f5;
+    background-color: #0f2230;
+    border-color: #28546a;
+}
+
+QFrame#behavior_pager QPushButton:disabled {
+    color: #4d6570;
+    background-color: #07141c;
+    border-color: #163040;
+}
+
+QLabel#lb_page {
+    min-width: 64px;
+    color: #e5f0f5;
+}
+
+QFrame#behavior_pager QLineEdit#le_page {
+    min-height: 34px;
+    max-height: 34px;
+    min-width: 56px;
+    max-width: 72px;
+    padding: 0 6px;
+    color: #e5f0f5;
+    background-color: #030a10;
+    border: 1px solid #1c3a4b;
+    border-radius: 6px;
+}
+
+QWidget#behavior_card_shot_box,
+QFrame#behavior_card_shot_box {
+    background-color: #02080c;
+}
+
 QLabel#behavior_card_shot {
     background-color: #02080c;
     color: #91a9b6;
-    min-height: 150px;
 }
 
 QLabel#behavior_card_badge {
-    padding: 2px 6px;
+    padding: 3px 8px;
     color: #ffffff;
-    background-color: #e23b3b;
+    background-color: #c62828;
+    border-radius: 3px;
     font-size: 12px;
     font-weight: 600;
 }
@@ -107,6 +167,7 @@ QLabel#lb_ship {
     font-size: 15px;
     font-weight: 600;
     color: #e5f0f5;
+    min-height: 20px;
 }
 
 QLabel#lb_behavior {

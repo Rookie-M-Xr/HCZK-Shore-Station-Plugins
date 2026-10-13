@@ -30,7 +30,7 @@ bin/plugins/hello_service.dll
 
 插件工程默认编成可执行程序，用 Qt Creator 打开后直接运行、下断点，不必启动岸基。要交给岸基加载时，给同一次 qmake 加上 `CONFIG+=shore_plugin`。DLL 目录由该插件 `.pro` 里的 `SHORE_PLUGIN_DIR` 决定，默认是岸基 exe 旁的 `bin/plugins`。岸基只在启动时扫描这个目录，不参与插件编译。
 
-行为识别：打开 `plugins/behavior_page/behavior_page.pro`。不附加参数时运行 `behavior_page_app`；调试数据在 exe 旁的 `behavior_page_debug`。菜单「样例」再追加一条记录。附加 `CONFIG+=shore_plugin` 后得到 `bin/plugins/behavior_page.dll`，岸基里使用的是同一套功能。
+行为识别：打开 `plugins/behavior_page/behavior_page.pro`。`dev-temp` 演示只读 `behavior_page/data/records.json` 与本地图，不查远程。复制 `records.json.example` 为 `records.json` 后改字段即可。附加 `CONFIG+=shore_plugin` 后得到 `bin/plugins/behavior_page.dll`，岸基里使用的是同一套功能。
 
 ## 运行时如何加载
 

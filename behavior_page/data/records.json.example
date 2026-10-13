@@ -1,0 +1,49 @@
+{
+  "_readme": "复制为本目录 records.json 后改字段即可演示。local_path 可为绝对路径，或相对 picture/、data/、插件根目录。behaviors：0 未知，1 安全帽，2 救生衣，3 玩手机，4 着火，5 打架。同一船内 message_id 不要重复。缺图仍显示元数据。改完点刷新。",
+  "records": [
+    {
+      "ship_id": 10001,
+      "ship_name": "演示船甲",
+      "message_id": 1,
+      "camera_id": 1,
+      "camera_name": "控制室",
+      "position": "集控室",
+      "timestamp_ms": 1760160000000,
+      "behaviors": [1, 2],
+      "local_path": "picture/demo_a1.jpg"
+    },
+    {
+      "ship_id": 10001,
+      "ship_name": "演示船甲",
+      "message_id": 2,
+      "camera_id": 2,
+      "camera_name": "驾驶室",
+      "position": "驾驶台",
+      "timestamp_ms": 1760160030000,
+      "behaviors": [3],
+      "local_path": "picture/demo_a2.jpg"
+    },
+    {
+      "ship_id": 10002,
+      "ship_name": "演示船乙",
+      "message_id": 1,
+      "camera_id": 1,
+      "camera_name": "甲板",
+      "position": "左舷",
+      "timestamp_ms": 1760160060000,
+      "behaviors": [5],
+      "local_path": "D:/demo/fight.jpg"
+    },
+    {
+      "ship_id": 10002,
+      "ship_name": "演示船乙",
+      "message_id": 2,
+      "camera_id": 2,
+      "camera_name": "货舱甲板",
+      "position": "货舱口",
+      "timestamp_ms": 1760160120000,
+      "behaviors": [4],
+      "local_path": "picture/demo_b2.jpg"
+    }
+  ]
+}

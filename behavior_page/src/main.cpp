@@ -16,6 +16,8 @@
 #include "behavior_page_plugin.h"
 #include "i_appearance_feed.h"
 #include "i_appearance_sink.h"
+#include "i_behavior_feed.h"
+#include "i_behavior_sink.h"
 #include "i_cloud_blob.h"
 #include "i_hczk_feed.h"
 #include "i_hczk_sink.h"
@@ -93,7 +95,8 @@ public:
 
 class StandaloneContext final : public shore_station::plugin_sdk::IPluginContext,
                                 public shore_station::plugin_sdk::IHczkFeed,
-                                public shore_station::plugin_sdk::IAppearanceFeed
+                                public shore_station::plugin_sdk::IAppearanceFeed,
+                                public shore_station::plugin_sdk::IBehaviorFeed
 {
 public:
     shore_station::plugin_sdk::ILogService &log() override
@@ -119,6 +122,11 @@ public:
     shore_station::plugin_sdk::ICloudBlob &cloudBlob() override
     {
         return blob_;
+    }
+
+    shore_station::plugin_sdk::IBehaviorFeed &behaviorFeed() override
+    {
+        return *this;
     }
 
     QVector<shore_station::plugin_sdk::HostCamera> cameras() const override
@@ -165,12 +173,25 @@ public:
         }
     }
 
+    void subscribe(shore_station::plugin_sdk::IBehaviorSink &sink) override
+    {
+        behavior_sink_ = &sink;
+    }
+
+    void unsubscribe(shore_station::plugin_sdk::IBehaviorSink &sink) override
+    {
+        if (behavior_sink_ == &sink) {
+            behavior_sink_ = nullptr;
+        }
+    }
+
 private:
     StandaloneLog log_;
     StandaloneUi ui_;
     StandaloneBlob blob_;
     shore_station::plugin_sdk::IHczkSink *hczk_sink_ = nullptr;
     shore_station::plugin_sdk::IAppearanceSink *appearance_sink_ = nullptr;
+    shore_station::plugin_sdk::IBehaviorSink *behavior_sink_ = nullptr;
 };
 }  // namespace
 

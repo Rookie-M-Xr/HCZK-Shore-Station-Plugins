@@ -23,15 +23,13 @@ HEADERS += \
     $$PWD/include/behavior_page_widget.h \
     $$PWD/include/behavior_settings_dialog.h \
     $$PWD/include/behavior_store.h \
-    $$PWD/include/behavior_types.h \
-    $$PWD/include/behavior_codec.h
+    $$PWD/include/behavior_types.h
 
 SOURCES += \
     $$PWD/src/behavior_page_plugin.cpp \
     $$PWD/src/behavior_page_widget.cpp \
     $$PWD/src/behavior_settings_dialog.cpp \
-    $$PWD/src/behavior_store.cpp \
-    $$PWD/src/behavior_codec.cpp
+    $$PWD/src/behavior_store.cpp
 
 RESOURCES += \
     $$PWD/behavior_page.qrc
@@ -39,7 +37,8 @@ RESOURCES += \
 DISTFILES += \
     $$PWD/include/behavior_page.json \
     $$PWD/style/light.qss \
-    $$PWD/style/dark.qss
+    $$PWD/style/dark.qss \
+    $$PWD/data/records.json.example
 
 !contains(CONFIG, shore_plugin) {
     SOURCES += \

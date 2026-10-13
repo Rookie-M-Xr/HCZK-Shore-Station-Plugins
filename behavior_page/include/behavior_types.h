@@ -19,7 +19,7 @@ inline constexpr quint8 kBehaviorPhone = 0x03;
 inline constexpr quint8 kBehaviorFire = 0x04;
 inline constexpr quint8 kBehaviorFight = 0x05;
 
-// 协议命令字待船端文档确认；暂用 0x2B01，避免与视频 0x2Axx / 0xBAxx 冲突
+// 已废弃：产品路径是主体 0xCA00 + GetImage。保留仅避免旧调试数据编译失败
 inline constexpr quint16 kHczkCmdBehaviorResult = 0x2B01;
 
 // MAX_IMAGE_URL_LEN 协议未给出，按定长 256 解析

@@ -7,6 +7,7 @@
 
 #include <QAbstractItemView>
 #include <QCalendarWidget>
+#include <QCheckBox>
 #include <QColor>
 #include <QComboBox>
 #include <QCoreApplication>
@@ -16,20 +17,26 @@
 #include <QDir>
 #include <QEvent>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QPalette>
+#include <QHideEvent>
 #include <QShowEvent>
 #include <QTextCharFormat>
 #include <QTimer>
 #include <QFrame>
 #include <QGridLayout>
 #include <QHBoxLayout>
+#include <QImageReader>
+#include <QIntValidator>
 #include <QLabel>
+#include <QLineEdit>
 #include <QList>
 #include <QMouseEvent>
 #include <QPixmap>
 #include <QPushButton>
+#include <QSize>
 #include <QResizeEvent>
 #include <QScrollArea>
 #include <QScrollBar>
@@ -49,8 +56,27 @@ namespace shore_station::behavior_page
 namespace
 {
 constexpr int kCardMinWidth = 280;
+constexpr int kPageSize = 18;
 constexpr int kToolbarControlHeight = 34;
 constexpr quint8 kAllBehavior = 255;
+const QSize kCardThumbSize(560, 360);
+const QSize kStripThumbSize(132, 74);
+
+QString resolvedShipName(const BehaviorStore &store, const BehaviorRecord &record)
+{
+    const QString name = record.ship_name.trimmed();
+    if (!name.isEmpty() && name != QStringLiteral("未命名船") && name != QStringLiteral("未分类")) {
+        return name;
+    }
+    const QString mapped = store.displayShipName(record.ship_id).trimmed();
+    if (!mapped.isEmpty()) {
+        return mapped;
+    }
+    if (!name.isEmpty()) {
+        return name;
+    }
+    return record.ship_id == 0 ? QString() : QString::number(record.ship_id);
+}
 
 class ClickFrame final : public QFrame
 {
@@ -87,12 +113,30 @@ QDateTime fromUtcMs(qint64 timestamp_ms)
     return QDateTime::fromMSecsSinceEpoch(timestamp_ms, QTimeZone::UTC).toLocalTime();
 }
 
-QPixmap loadRecordImage(const BehaviorRecord &record)
+QPixmap loadRecordImage(const QString &path, const QSize &bound)
 {
-    if (record.local_path.isEmpty()) {
+    if (path.isEmpty() || !QFileInfo::exists(path)) {
         return QPixmap();
     }
-    return QPixmap(record.local_path);
+    QImageReader reader(path);
+    reader.setAutoTransform(true);
+    const QSize original = reader.size();
+    if (original.isValid() && bound.isValid() && !bound.isEmpty()) {
+        const QSize fitted = original.scaled(bound, Qt::KeepAspectRatio);
+        if (fitted.width() < original.width() || fitted.height() < original.height()) {
+            reader.setScaledSize(fitted);
+        }
+    }
+    const QImage image = reader.read();
+    if (image.isNull()) {
+        return QPixmap();
+    }
+    return QPixmap::fromImage(image);
+}
+
+QPixmap loadRecordImage(const BehaviorRecord &record, const QSize &bound)
+{
+    return loadRecordImage(record.local_path, bound);
 }
 
 QString cameraCaption(const QString &name, quint16 camera_id)
@@ -154,6 +198,9 @@ BehaviorPageWidget::BehaviorPageWidget(BehaviorStore &store, QWidget *parent)
     , cmb_ship_(nullptr)
     , cmb_camera_(nullptr)
     , cmb_behavior_(nullptr)
+    , pbn_refresh_(nullptr)
+    , ckb_auto_refresh_(nullptr)
+    , lb_countdown_(nullptr)
     , dt_start_(nullptr)
     , dt_end_(nullptr)
     , pbn_live_(nullptr)
@@ -162,6 +209,12 @@ BehaviorPageWidget::BehaviorPageWidget(BehaviorStore &store, QWidget *parent)
     , grid_host_(nullptr)
     , grid_layout_(nullptr)
     , lb_empty_(nullptr)
+    , pager_(nullptr)
+    , pbn_prev_(nullptr)
+    , lb_page_(nullptr)
+    , pbn_next_(nullptr)
+    , le_page_(nullptr)
+    , pbn_jump_(nullptr)
     , lightbox_(nullptr)
     , lb_lightbox_image_(nullptr)
     , lb_lightbox_time_(nullptr)
@@ -191,6 +244,14 @@ BehaviorPageWidget::BehaviorPageWidget(BehaviorStore &store, QWidget *parent)
     cmb_camera_->setObjectName(QStringLiteral("cmb_camera"));
     cmb_behavior_ = new QComboBox(toolbar);
     cmb_behavior_->setObjectName(QStringLiteral("cmb_behavior"));
+    pbn_refresh_ = new QPushButton(tr("刷新"), toolbar);
+    pbn_refresh_->setObjectName(QStringLiteral("pbn_refresh"));
+    ckb_auto_refresh_ = new QCheckBox(tr("自动刷新"), toolbar);
+    ckb_auto_refresh_->setObjectName(QStringLiteral("ckb_auto_refresh"));
+    ckb_auto_refresh_->setChecked(store_.autoRefresh());
+    lb_countdown_ = new QLabel(toolbar);
+    lb_countdown_->setObjectName(QStringLiteral("lb_countdown"));
+    lb_countdown_->setAlignment(Qt::AlignCenter);
     dt_start_ = new QDateTimeEdit(toolbar);
     dt_start_->setObjectName(QStringLiteral("dt_start"));
     dt_start_->setDisplayFormat(QStringLiteral("yyyy-MM-dd HH:mm:ss"));
@@ -213,6 +274,9 @@ BehaviorPageWidget::BehaviorPageWidget(BehaviorStore &store, QWidget *parent)
     const QList<QWidget *> toolbar_controls = {cmb_ship_,
                                                cmb_camera_,
                                                cmb_behavior_,
+                                               pbn_refresh_,
+                                               ckb_auto_refresh_,
+                                               lb_countdown_,
                                                dt_start_,
                                                dt_end_,
                                                pbn_live_,
@@ -226,6 +290,9 @@ BehaviorPageWidget::BehaviorPageWidget(BehaviorStore &store, QWidget *parent)
     toolbar_layout->addWidget(cmb_ship_);
     toolbar_layout->addWidget(cmb_camera_);
     toolbar_layout->addWidget(cmb_behavior_);
+    toolbar_layout->addWidget(pbn_refresh_);
+    toolbar_layout->addWidget(ckb_auto_refresh_);
+    toolbar_layout->addWidget(lb_countdown_);
     toolbar_layout->addWidget(dt_start_);
     toolbar_layout->addWidget(dt_end_);
     toolbar_layout->addWidget(pbn_live_);
@@ -235,14 +302,15 @@ BehaviorPageWidget::BehaviorPageWidget(BehaviorStore &store, QWidget *parent)
     grid_scroll_ = new QScrollArea(this);
     grid_scroll_->setObjectName(QStringLiteral("behavior_grid_scroll"));
     grid_scroll_->setWidgetResizable(true);
+    grid_scroll_->setAlignment(Qt::AlignTop | Qt::AlignLeft);
     grid_scroll_->setFrameShape(QFrame::NoFrame);
     grid_scroll_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     grid_scroll_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     grid_host_ = new QWidget(grid_scroll_);
     grid_host_->setObjectName(QStringLiteral("behavior_grid_host"));
-    grid_host_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    grid_host_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
     grid_layout_ = new QGridLayout(grid_host_);
-    grid_layout_->setContentsMargins(0, 0, 0, 0);
+    grid_layout_->setContentsMargins(0, 0, 0, 12);
     grid_layout_->setSpacing(14);
     grid_layout_->setAlignment(Qt::AlignTop);
     lb_empty_ = new QLabel(tr("无识别帧"), grid_host_);
@@ -252,6 +320,43 @@ BehaviorPageWidget::BehaviorPageWidget(BehaviorStore &store, QWidget *parent)
     grid_scroll_->setWidget(grid_host_);
     grid_scroll_->viewport()->installEventFilter(this);
     root->addWidget(grid_scroll_, 1);
+
+    pager_ = new QFrame(this);
+    pager_->setObjectName(QStringLiteral("behavior_pager"));
+    pager_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    pager_->setMinimumHeight(40);
+    auto *pager_layout = new QHBoxLayout(pager_);
+    pager_layout->setContentsMargins(0, 4, 0, 0);
+    pager_layout->setSpacing(8);
+    pager_layout->addStretch(1);
+    pbn_prev_ = new QPushButton(tr("上一页"), pager_);
+    pbn_prev_->setObjectName(QStringLiteral("pbn_prev"));
+    lb_page_ = new QLabel(pager_);
+    lb_page_->setObjectName(QStringLiteral("lb_page"));
+    lb_page_->setAlignment(Qt::AlignCenter);
+    pbn_next_ = new QPushButton(tr("下一页"), pager_);
+    pbn_next_->setObjectName(QStringLiteral("pbn_next"));
+    le_page_ = new QLineEdit(pager_);
+    le_page_->setObjectName(QStringLiteral("le_page"));
+    le_page_->setAlignment(Qt::AlignCenter);
+    le_page_->setFixedWidth(56);
+    le_page_->setMaxLength(4);
+    le_page_->setValidator(new QIntValidator(1, 9999, le_page_));
+    pbn_jump_ = new QPushButton(tr("跳转"), pager_);
+    pbn_jump_->setObjectName(QStringLiteral("pbn_jump"));
+    const QList<QWidget *> pager_controls = {pbn_prev_, pbn_next_, le_page_, pbn_jump_};
+    for (QWidget *control : pager_controls) {
+        control->setMinimumHeight(kToolbarControlHeight);
+        control->setMaximumHeight(kToolbarControlHeight);
+        control->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+    }
+    pager_layout->addWidget(pbn_prev_);
+    pager_layout->addWidget(lb_page_);
+    pager_layout->addWidget(pbn_next_);
+    pager_layout->addWidget(le_page_);
+    pager_layout->addWidget(pbn_jump_);
+    pager_layout->addStretch(1);
+    root->addWidget(pager_);
 
     lightbox_ = new QWidget(this);
     lightbox_->setObjectName(QStringLiteral("behavior_lightbox"));
@@ -302,26 +407,62 @@ BehaviorPageWidget::BehaviorPageWidget(BehaviorStore &store, QWidget *parent)
 
     connect(cmb_ship_, &QComboBox::currentIndexChanged, this, [this]() {
         fillCameras();
+        page_index_ = 0;
+        if (window_loaded_) {
+            reloadWindow(false);
+        } else {
+            renderGrid();
+        }
+    });
+    connect(cmb_camera_, &QComboBox::currentIndexChanged, this, [this]() {
+        page_index_ = 0;
         renderGrid();
     });
-    connect(cmb_camera_, &QComboBox::currentIndexChanged, this, [this]() { renderGrid(); });
-    connect(cmb_behavior_, &QComboBox::currentIndexChanged, this, [this]() { renderGrid(); });
+    connect(cmb_behavior_, &QComboBox::currentIndexChanged, this, [this]() {
+        page_index_ = 0;
+        renderGrid();
+    });
     connect(dt_start_, &QDateTimeEdit::dateTimeChanged, this, [this]() {
-        start_touched_ = true;
-        renderGrid();
+        page_index_ = 0;
+        if (window_loaded_) {
+            reloadWindow(false);
+        } else {
+            renderGrid();
+        }
     });
-    connect(dt_end_, &QDateTimeEdit::dateTimeChanged, this, [this]() { renderGrid(); });
+    connect(dt_end_, &QDateTimeEdit::dateTimeChanged, this, [this]() {
+        page_index_ = 0;
+        if (window_loaded_) {
+            reloadWindow(false);
+        } else {
+            renderGrid();
+        }
+    });
     connect(pbn_live_, &QPushButton::clicked, this, [this]() {
         live_end_ = pbn_live_->isChecked();
         dt_end_->setEnabled(!live_end_);
         if (live_end_) {
             syncEndTime();
         }
-        renderGrid();
+        page_index_ = 0;
+        if (window_loaded_) {
+            reloadWindow(false);
+        } else {
+            renderGrid();
+        }
     });
+    connect(pbn_refresh_, &QPushButton::clicked, this, [this]() { reloadWindow(true); });
+    connect(ckb_auto_refresh_, &QCheckBox::toggled, this, [this](bool checked) {
+        onAutoRefreshToggled(checked);
+    });
+    connect(pbn_prev_, &QPushButton::clicked, this, [this]() { goPrevPage(); });
+    connect(pbn_next_, &QPushButton::clicked, this, [this]() { goNextPage(); });
+    connect(pbn_jump_, &QPushButton::clicked, this, [this]() { goJumpPage(); });
+    connect(le_page_, &QLineEdit::returnPressed, this, [this]() { goJumpPage(); });
     connect(tbn_settings_, &QToolButton::clicked, this, [this]() {
         BehaviorSettingsDialog dialog(store_, this);
         dialog.exec();
+        updateCountdown();
     });
     connect(pbn_close, &QPushButton::clicked, this, [this]() { closeLightbox(); });
     connect(&store_, &BehaviorStore::recordsChanged, this, [this]() {
@@ -331,9 +472,27 @@ BehaviorPageWidget::BehaviorPageWidget(BehaviorStore &store, QWidget *parent)
             renderLightbox();
         }
     });
+    connect(&store_,
+            &BehaviorStore::recordImageReady,
+            this,
+            [this](quint32 ship_id, quint32 message_id) {
+                updateCardImage(ship_id, message_id);
+                updateLightboxImage(ship_id, message_id);
+            });
+    connect(&store_, &BehaviorStore::queryFinished, this, [this]() {
+        if (isVisible()) {
+            store_.requestPageImages(pageRecords());
+        }
+    });
+    connect(&store_, &BehaviorStore::pullScheduleChanged, this, [this]() {
+        const QSignalBlocker blocker(ckb_auto_refresh_);
+        ckb_auto_refresh_->setChecked(store_.autoRefresh());
+        updateCountdown();
+    });
 
     fillFilters();
     renderGrid();
+    updateCountdown();
 
     catalog_timer_ = new QTimer(this);
     catalog_timer_->setInterval(2000);
@@ -343,6 +502,11 @@ BehaviorPageWidget::BehaviorPageWidget(BehaviorStore &store, QWidget *parent)
         }
     });
     catalog_timer_->start();
+
+    countdown_timer_ = new QTimer(this);
+    countdown_timer_->setInterval(250);
+    connect(countdown_timer_, &QTimer::timeout, this, [this]() { updateCountdown(); });
+    countdown_timer_->start();
 }
 
 void BehaviorPageWidget::resizeEvent(QResizeEvent *event)
@@ -355,8 +519,22 @@ void BehaviorPageWidget::resizeEvent(QResizeEvent *event)
 void BehaviorPageWidget::showEvent(QShowEvent *event)
 {
     QWidget::showEvent(event);
+    store_.setPageVisible(true);
     refreshHostCatalog();
+    if (!window_loaded_) {
+        window_loaded_ = true;
+        reloadWindow(true);
+    } else {
+        applyQueryWindow();
+        store_.requestPageImages(pageRecords());
+    }
     relayoutGrid();
+}
+
+void BehaviorPageWidget::hideEvent(QHideEvent *event)
+{
+    store_.setPageVisible(false);
+    QWidget::hideEvent(event);
 }
 
 bool BehaviorPageWidget::eventFilter(QObject *watched, QEvent *event)
@@ -460,43 +638,32 @@ void BehaviorPageWidget::refreshHostCatalog()
     }
     host_camera_signature_ = signature;
     fillFilters();
-    renderGrid();
+    if (window_loaded_ && isVisible()) {
+        reloadWindow(false);
+    } else {
+        renderGrid();
+    }
 }
 
-void BehaviorPageWidget::revealStoredPictures()
+void BehaviorPageWidget::applyQueryWindow()
 {
-    if (range_initialized_ || start_touched_ || store_.records().isEmpty()) {
-        return;
+    quint32 ship_id = 0;
+    if (cmb_ship_->currentIndex() > 0) {
+        ship_id = cmb_ship_->currentData().toUInt();
     }
-    if (cmb_ship_->currentIndex() > 0 || cmb_camera_->currentIndex() > 0
-        || cmb_behavior_->currentData().toInt() != static_cast<int>(kAllBehavior)) {
-        return;
+    store_.setQueryWindow(rangeStart().toMSecsSinceEpoch(),
+                          rangeEnd().toMSecsSinceEpoch(),
+                          ship_id);
+}
+
+void BehaviorPageWidget::reloadWindow(bool flush_inbox)
+{
+    applyQueryWindow();
+    if (flush_inbox) {
+        store_.refreshNow();
+    } else {
+        store_.queryCurrentWindow();
     }
-    if (!visibleRecords().isEmpty()) {
-        range_initialized_ = true;
-        return;
-    }
-    qint64 earliest = 0;
-    for (const BehaviorRecord &record : store_.records()) {
-        if (record.timestamp_ms <= 0) {
-            continue;
-        }
-        if (earliest == 0 || record.timestamp_ms < earliest) {
-            earliest = record.timestamp_ms;
-        }
-    }
-    range_initialized_ = true;
-    if (earliest <= 0) {
-        return;
-    }
-    const QTimeZone zone = QTimeZone::systemTimeZone();
-    const QDateTime local = QDateTime::fromMSecsSinceEpoch(earliest, zone);
-    const QDateTime start(local.date(), QTime(0, 0, 0), zone);
-    if (dt_start_->dateTime() <= start) {
-        return;
-    }
-    const QSignalBlocker blocker(dt_start_);
-    dt_start_->setDateTime(start);
 }
 
 QString BehaviorPageWidget::recordKey(quint32 ship_id, quint32 message_id) const
@@ -531,13 +698,8 @@ QVector<BehaviorRecord> BehaviorPageWidget::visibleRecords() const
     const quint32 ship_id = cmb_ship_->currentData().toUInt();
     const QString camera_key = cmb_camera_->currentData().toString();
     const int behavior = cmb_behavior_->currentData().toInt();
-    const qint64 start_ms = rangeStart().toUTC().toMSecsSinceEpoch();
-    const qint64 end_ms = rangeEnd().toUTC().toMSecsSinceEpoch();
     QVector<BehaviorRecord> shown;
     for (const BehaviorRecord &record : store_.records()) {
-        if (record.timestamp_ms < start_ms || record.timestamp_ms > end_ms) {
-            continue;
-        }
         if (cmb_ship_->currentIndex() > 0 && record.ship_id != ship_id) {
             continue;
         }
@@ -562,6 +724,108 @@ QVector<BehaviorRecord> BehaviorPageWidget::visibleRecords() const
     return shown;
 }
 
+QVector<BehaviorRecord> BehaviorPageWidget::pageRecords() const
+{
+    const QVector<BehaviorRecord> shown = visibleRecords();
+    if (shown.isEmpty()) {
+        return {};
+    }
+    const int start = page_index_ * kPageSize;
+    if (start >= shown.size()) {
+        return {};
+    }
+    return shown.mid(start, kPageSize);
+}
+
+void BehaviorPageWidget::clampPage()
+{
+    const int total = visibleRecords().size();
+    const int page_count = total <= 0 ? 1 : (total + kPageSize - 1) / kPageSize;
+    if (page_index_ >= page_count) {
+        page_index_ = page_count - 1;
+    }
+    if (page_index_ < 0) {
+        page_index_ = 0;
+    }
+}
+
+void BehaviorPageWidget::updatePager()
+{
+    const int total = visibleRecords().size();
+    const int page_count = total <= 0 ? 1 : (total + kPageSize - 1) / kPageSize;
+    pager_->show();
+    lb_page_->setText(QStringLiteral("%1 / %2").arg(page_index_ + 1).arg(page_count));
+    pbn_prev_->setEnabled(total > 0 && page_index_ > 0);
+    pbn_next_->setEnabled(total > 0 && page_index_ + 1 < page_count);
+    pbn_jump_->setEnabled(total > 0);
+    le_page_->setEnabled(total > 0);
+}
+
+void BehaviorPageWidget::goPrevPage()
+{
+    if (page_index_ <= 0) {
+        return;
+    }
+    --page_index_;
+    renderGrid();
+}
+
+void BehaviorPageWidget::goNextPage()
+{
+    const int total = visibleRecords().size();
+    const int page_count = total <= 0 ? 1 : (total + kPageSize - 1) / kPageSize;
+    if (page_index_ + 1 >= page_count) {
+        return;
+    }
+    ++page_index_;
+    renderGrid();
+}
+
+void BehaviorPageWidget::goJumpPage()
+{
+    bool ok = false;
+    const int page = le_page_->text().trimmed().toInt(&ok);
+    if (!ok) {
+        return;
+    }
+    const int total = visibleRecords().size();
+    const int page_count = total <= 0 ? 1 : (total + kPageSize - 1) / kPageSize;
+    const int target = qBound(1, page, page_count) - 1;
+    if (target == page_index_) {
+        return;
+    }
+    page_index_ = target;
+    renderGrid();
+}
+
+void BehaviorPageWidget::updateCountdown()
+{
+    if (lb_countdown_ == nullptr) {
+        return;
+    }
+    if (!store_.autoRefresh()) {
+        lb_countdown_->hide();
+        lb_countdown_->clear();
+        return;
+    }
+    const qint64 due = store_.nextAutoPullDueMs();
+    int sec = 0;
+    if (due > 0) {
+        sec = static_cast<int>((due - QDateTime::currentMSecsSinceEpoch() + 999) / 1000);
+        if (sec < 0) {
+            sec = 0;
+        }
+    }
+    lb_countdown_->setText(QStringLiteral("%1:%2").arg(sec / 60).arg(sec % 60, 2, 10, QChar('0')));
+    lb_countdown_->show();
+}
+
+void BehaviorPageWidget::onAutoRefreshToggled(bool checked)
+{
+    store_.setAutoRefresh(checked);
+    updateCountdown();
+}
+
 void BehaviorPageWidget::fillFilters()
 {
     const quint32 previous_ship = cmb_ship_->currentData().toUInt();
@@ -574,18 +838,11 @@ void BehaviorPageWidget::fillFilters()
     cmb_ship_->addItem(tr("全部船舶"), 0);
     QVector<quint32> ships;
     QVector<quint8> extra_types;
-    for (const plugin_sdk::HostCamera &camera : store_.hostCameras()) {
-        if (camera.ship_id == 0 || ships.contains(camera.ship_id)) {
-            continue;
-        }
-        ships.append(camera.ship_id);
-        cmb_ship_->addItem(camera.ship_name.isEmpty() ? QString::number(camera.ship_id) : camera.ship_name,
-                           camera.ship_id);
-    }
     for (const BehaviorRecord &record : store_.records()) {
         if (record.ship_id != 0 && !ships.contains(record.ship_id)) {
             ships.append(record.ship_id);
-            cmb_ship_->addItem(record.ship_name.isEmpty() ? QString::number(record.ship_id) : record.ship_name,
+            cmb_ship_->addItem(record.ship_name.trimmed().isEmpty() ? QString::number(record.ship_id)
+                                                                   : record.ship_name,
                                record.ship_id);
         }
         for (quint8 type : record.behaviors) {
@@ -593,6 +850,13 @@ void BehaviorPageWidget::fillFilters()
                 extra_types.append(type);
             }
         }
+    }
+    for (const quint32 ship_id : store_.knownShipIds()) {
+        if (ship_id == 0 || ships.contains(ship_id)) {
+            continue;
+        }
+        ships.append(ship_id);
+        cmb_ship_->addItem(store_.displayShipName(ship_id), ship_id);
     }
     for (int index = 0; index < cmb_ship_->count(); ++index) {
         if (cmb_ship_->itemData(index).toUInt() == previous_ship) {
@@ -629,21 +893,6 @@ void BehaviorPageWidget::fillCameras()
     cmb_camera_->clear();
     cmb_camera_->addItem(tr("全部摄像头"), QString());
     QStringList seen;
-    for (const plugin_sdk::HostCamera &camera : store_.hostCameras()) {
-        if (cmb_ship_->currentIndex() > 0 && camera.ship_id != ship_id) {
-            continue;
-        }
-        const QString key = recordKey(camera.ship_id, camera.camera_id);
-        if (seen.contains(key)) {
-            continue;
-        }
-        seen.append(key);
-        const QString caption = cameraCaption(camera.camera_name, camera.camera_id);
-        const QString label = cmb_ship_->currentIndex() > 0
-            ? caption
-            : camera.ship_name + QStringLiteral(" / ") + caption;
-        cmb_camera_->addItem(label, key);
-    }
     for (const BehaviorRecord &record : store_.records()) {
         if (cmb_ship_->currentIndex() > 0 && record.ship_id != ship_id) {
             continue;
@@ -659,6 +908,21 @@ void BehaviorPageWidget::fillCameras()
             : record.ship_name + QStringLiteral(" / ") + caption;
         cmb_camera_->addItem(label, key);
     }
+    for (const plugin_sdk::HostCamera &camera : store_.hostCameras()) {
+        if (cmb_ship_->currentIndex() > 0 && camera.ship_id != ship_id) {
+            continue;
+        }
+        const QString key = recordKey(camera.ship_id, camera.camera_id);
+        if (seen.contains(key)) {
+            continue;
+        }
+        seen.append(key);
+        const QString caption = cameraCaption(camera.camera_name, camera.camera_id);
+        const QString label = cmb_ship_->currentIndex() > 0
+            ? caption
+            : camera.ship_name + QStringLiteral(" / ") + caption;
+        cmb_camera_->addItem(label, key);
+    }
     for (int index = 0; index < cmb_camera_->count(); ++index) {
         if (cmb_camera_->itemData(index).toString() == previous) {
             cmb_camera_->setCurrentIndex(index);
@@ -672,8 +936,11 @@ void BehaviorPageWidget::renderGrid()
     if (live_end_) {
         syncEndTime();
     }
-    revealStoredPictures();
-    const QVector<BehaviorRecord> shown = visibleRecords();
+    clampPage();
+    const QVector<BehaviorRecord> shown = pageRecords();
+    if (isVisible()) {
+        store_.requestPageImages(shown);
+    }
     cards_.clear();
     while (QLayoutItem *item = grid_layout_->takeAt(0)) {
         if (item->widget() != nullptr && item->widget() != lb_empty_) {
@@ -684,12 +951,15 @@ void BehaviorPageWidget::renderGrid()
     if (shown.isEmpty()) {
         lb_empty_->show();
         grid_layout_->addWidget(lb_empty_, 0, 0);
+        grid_host_->setMinimumHeight(0);
+        updatePager();
         return;
     }
     lb_empty_->hide();
     for (const BehaviorRecord &record : shown) {
         cards_.append(createCard(record));
     }
+    updatePager();
     last_grid_width_ = -1;
     last_columns_ = 0;
     relayoutGrid();
@@ -723,19 +993,24 @@ void BehaviorPageWidget::applyCardShotSize(QFrame *card, int column_width) const
     if (shot == nullptr) {
         return;
     }
-    const QPixmap source = shot->property("source").value<QPixmap>();
+    const int inner_width = qMax(1, column_width);
+    const QString path = card->property("image_path").toString();
+    const QPixmap source = loadRecordImage(path, QSize(inner_width, inner_width));
+    int inner_height = qMax(150, inner_width * 9 / 16);
+    if (!source.isNull() && source.width() > 0) {
+        inner_height = qMax(1, inner_width * source.height() / source.width());
+    }
+    auto *box = card->findChild<QWidget *>(QStringLiteral("behavior_card_shot_box"));
+    if (box != nullptr) {
+        box->setFixedHeight(inner_height);
+    }
+    shot->setMinimumSize(0, 0);
+    shot->setScaledContents(false);
     if (source.isNull()) {
         return;
     }
-    const int inner_width = qMax(1, column_width);
-    const int inner_height = qMax(150, inner_width * 9 / 16);
-    shot->setPixmap(
-        source.scaled(QSize(inner_width, inner_height), Qt::KeepAspectRatio, Qt::SmoothTransformation));
-    auto *badge = shot->findChild<QLabel *>(QStringLiteral("behavior_card_badge"));
-    if (badge != nullptr) {
-        badge->move(8, 8);
-        badge->raise();
-    }
+    shot->setText(QString());
+    shot->setPixmap(source);
 }
 
 void BehaviorPageWidget::relayoutGrid()
@@ -772,45 +1047,67 @@ void BehaviorPageWidget::relayoutGrid()
         grid_layout_->addWidget(card, index / columns, index % columns);
         ++index;
     }
+    grid_layout_->activate();
+    grid_host_->setMinimumHeight(qMax(1, grid_layout_->sizeHint().height()));
 }
 
 QFrame *BehaviorPageWidget::createCard(const BehaviorRecord &record)
 {
     auto *card = new ClickFrame(grid_host_);
     card->setObjectName(QStringLiteral("behavior_card"));
+    card->setProperty("ship_id", record.ship_id);
+    card->setProperty("message_id", record.message_id);
     card->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    card->setProperty("image_path", record.local_path);
     auto *layout = new QVBoxLayout(card);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(0);
-    auto *shot = new QLabel(card);
+    auto *shot_box = new QFrame(card);
+    shot_box->setObjectName(QStringLiteral("behavior_card_shot_box"));
+    shot_box->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    auto *shot_layout = new QGridLayout(shot_box);
+    shot_layout->setContentsMargins(0, 0, 0, 0);
+    shot_layout->setSpacing(0);
+    auto *shot = new QLabel(shot_box);
     shot->setObjectName(QStringLiteral("behavior_card_shot"));
-    shot->setMinimumHeight(150);
     shot->setAlignment(Qt::AlignCenter);
-    shot->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
-    const QPixmap image = loadRecordImage(record);
-    shot->setProperty("source", QVariant::fromValue(image));
-    if (image.isNull()) {
+    shot->setScaledContents(false);
+    shot->setMinimumSize(0, 0);
+    shot->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
+    if (record.local_path.isEmpty() && store_.isFetching(record.ship_id, record.message_id)) {
         shot->setText(tr("下载中"));
-    } else {
-        shot->setPixmap(
-            image.scaled(QSize(kCardMinWidth, 180), Qt::KeepAspectRatio, Qt::SmoothTransformation));
     }
-    auto *badge = new QLabel(joinBehaviors(record.behaviors), shot);
+    const QString behaviors = joinBehaviors(record.behaviors);
+    auto *badge = new QLabel(behaviors, shot_box);
     badge->setObjectName(QStringLiteral("behavior_card_badge"));
-    badge->move(8, 8);
-    badge->adjustSize();
+    badge->setAttribute(Qt::WA_StyledBackground, true);
+    badge->setAutoFillBackground(true);
+    badge->setContentsMargins(8, 8, 8, 8);
+    QPalette badge_palette = badge->palette();
+    badge_palette.setColor(QPalette::Window, QColor(0xc6, 0x28, 0x28));
+    badge_palette.setColor(QPalette::WindowText, Qt::white);
+    badge->setPalette(badge_palette);
+    if (behaviors.isEmpty()) {
+        badge->hide();
+    }
+    shot_layout->addWidget(shot, 0, 0);
+    shot_layout->addWidget(badge, 0, 0, Qt::AlignTop | Qt::AlignLeft);
     auto *meta = new QFrame(card);
     meta->setObjectName(QStringLiteral("behavior_card_meta"));
     auto *meta_layout = new QVBoxLayout(meta);
     meta_layout->setContentsMargins(10, 10, 12, 12);
     meta_layout->setSpacing(4);
-    auto *lb_ship = new QLabel(record.ship_name, meta);
+    auto *lb_ship = new QLabel(resolvedShipName(store_, record), meta);
     lb_ship->setObjectName(QStringLiteral("lb_ship"));
+    lb_ship->setMinimumHeight(20);
     auto *lb_camera = new QLabel(record.camera_name, meta);
     lb_camera->setObjectName(QStringLiteral("lb_camera"));
     auto *lb_position = new QLabel(record.position, meta);
     lb_position->setObjectName(QStringLiteral("lb_position"));
-    auto *lb_behavior = new QLabel(joinBehaviors(record.behaviors), meta);
+    if (record.position.trimmed().isEmpty()) {
+        lb_position->hide();
+    }
+    auto *lb_behavior = new QLabel(behaviors, meta);
     lb_behavior->setObjectName(QStringLiteral("lb_behavior"));
     auto *lb_time = new QLabel(fromUtcMs(record.timestamp_ms).toString(QStringLiteral("yyyy-MM-dd HH:mm:ss")),
                                meta);
@@ -820,7 +1117,7 @@ QFrame *BehaviorPageWidget::createCard(const BehaviorRecord &record)
     meta_layout->addWidget(lb_position);
     meta_layout->addWidget(lb_behavior);
     meta_layout->addWidget(lb_time);
-    layout->addWidget(shot);
+    layout->addWidget(shot_box);
     layout->addWidget(meta);
     const quint32 ship_id = record.ship_id;
     const quint32 message_id = record.message_id;
@@ -828,6 +1125,50 @@ QFrame *BehaviorPageWidget::createCard(const BehaviorRecord &record)
         openLightbox(ship_id, message_id);
     };
     return card;
+}
+
+void BehaviorPageWidget::updateCardImage(quint32 ship_id, quint32 message_id)
+{
+    const BehaviorRecord *record = nullptr;
+    for (const BehaviorRecord &item : store_.records()) {
+        if (item.ship_id == ship_id && item.message_id == message_id) {
+            record = &item;
+            break;
+        }
+    }
+    if (record == nullptr) {
+        return;
+    }
+    for (QFrame *card : cards_) {
+        if (card == nullptr || card->property("ship_id").toUInt() != ship_id
+            || card->property("message_id").toUInt() != message_id) {
+            continue;
+        }
+        card->setProperty("image_path", record->local_path);
+        auto *lb_ship = card->findChild<QLabel *>(QStringLiteral("lb_ship"));
+        if (lb_ship != nullptr) {
+            lb_ship->setText(resolvedShipName(store_, *record));
+        }
+        auto *shot = card->findChild<QLabel *>(QStringLiteral("behavior_card_shot"));
+        if (shot == nullptr) {
+            break;
+        }
+        if (record->local_path.isEmpty()) {
+            shot->setPixmap(QPixmap());
+            shot->setText(store_.isFetching(ship_id, message_id) ? tr("下载中") : QString());
+        }
+        int column_width = card->width();
+        if (column_width <= 0 && last_columns_ > 0 && last_grid_width_ > 0 && grid_layout_ != nullptr) {
+            const int spacing = grid_layout_->spacing();
+            column_width = (last_grid_width_ - spacing * (last_columns_ - 1)) / last_columns_;
+        }
+        applyCardShotSize(card, qMax(kCardMinWidth, column_width));
+        if (grid_layout_ != nullptr && grid_host_ != nullptr) {
+            grid_layout_->activate();
+            grid_host_->setMinimumHeight(qMax(1, grid_layout_->sizeHint().height()));
+        }
+        break;
+    }
 }
 
 void BehaviorPageWidget::openLightbox(quint32 ship_id, quint32 message_id)
@@ -849,7 +1190,7 @@ void BehaviorPageWidget::closeLightbox()
 
 void BehaviorPageWidget::renderLightbox()
 {
-    const QVector<BehaviorRecord> shown = visibleRecords();
+    const QVector<BehaviorRecord> shown = pageRecords();
     const BehaviorRecord *current = nullptr;
     for (const BehaviorRecord &record : shown) {
         if (record.ship_id == opened_ship_id_ && record.message_id == opened_message_id_) {
@@ -862,19 +1203,26 @@ void BehaviorPageWidget::renderLightbox()
         return;
     }
 
-    const QPixmap image = loadRecordImage(*current);
+    QSize lightbox_bound = lb_lightbox_image_->size();
+    if (!lightbox_bound.isValid() || lightbox_bound.width() < 64 || lightbox_bound.height() < 64) {
+        lightbox_bound = QSize(1280, 720);
+    }
+    const QPixmap image = loadRecordImage(*current, lightbox_bound);
     if (image.isNull()) {
         lb_lightbox_image_->setPixmap(QPixmap());
-        lb_lightbox_image_->setText(tr("下载中"));
+        if (store_.isFetching(current->ship_id, current->message_id)) {
+            lb_lightbox_image_->setText(tr("下载中"));
+        } else {
+            lb_lightbox_image_->setText(QString());
+        }
     } else {
         lb_lightbox_image_->setText(QString());
-        lb_lightbox_image_->setPixmap(
-            image.scaled(lb_lightbox_image_->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
+        lb_lightbox_image_->setPixmap(image);
     }
     lb_lightbox_time_->setText(
         fromUtcMs(current->timestamp_ms).toString(QStringLiteral("yyyy年MM月dd日 HH:mm:ss")));
     QStringList caption;
-    caption << current->ship_name << current->camera_name << current->position
+    caption << resolvedShipName(store_, *current) << current->camera_name << current->position
             << joinBehaviors(current->behaviors);
     caption.removeAll(QString());
     lb_lightbox_caption_->setText(caption.join(QStringLiteral("  ")));
@@ -889,6 +1237,8 @@ void BehaviorPageWidget::renderLightbox()
     for (const BehaviorRecord &record : shown) {
         auto *thumb = new ClickFrame(strip_host_);
         thumb->setObjectName(QStringLiteral("behavior_strip_card"));
+        thumb->setProperty("ship_id", record.ship_id);
+        thumb->setProperty("message_id", record.message_id);
         thumb->setFixedSize(132, 74);
         if (record.ship_id == opened_ship_id_ && record.message_id == opened_message_id_) {
             thumb->setProperty("on", true);
@@ -898,13 +1248,13 @@ void BehaviorPageWidget::renderLightbox()
         auto *thumb_layout = new QVBoxLayout(thumb);
         thumb_layout->setContentsMargins(0, 0, 0, 0);
         auto *image_label = new QLabel(thumb);
+        image_label->setObjectName(QStringLiteral("behavior_strip_shot"));
         image_label->setAlignment(Qt::AlignCenter);
-        const QPixmap thumb_image = loadRecordImage(record);
-        if (thumb_image.isNull()) {
+        const QPixmap thumb_image = loadRecordImage(record, kStripThumbSize);
+        if (thumb_image.isNull() && store_.isFetching(record.ship_id, record.message_id)) {
             image_label->setText(tr("下载中"));
         } else {
-            image_label->setPixmap(
-                thumb_image.scaled(QSize(132, 74), Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation));
+            image_label->setPixmap(thumb_image);
         }
         thumb_layout->addWidget(image_label);
         const quint32 ship_id = record.ship_id;
@@ -915,5 +1265,64 @@ void BehaviorPageWidget::renderLightbox()
         strip_layout->addWidget(thumb);
     }
     strip_layout->addItem(new QSpacerItem(0, 0, QSizePolicy::Expanding, QSizePolicy::Minimum));
+}
+
+void BehaviorPageWidget::updateLightboxImage(quint32 ship_id, quint32 message_id)
+{
+    if (lightbox_ == nullptr || !lightbox_->isVisible()) {
+        return;
+    }
+    const BehaviorRecord *record = nullptr;
+    for (const BehaviorRecord &item : pageRecords()) {
+        if (item.ship_id == ship_id && item.message_id == message_id) {
+            record = &item;
+            break;
+        }
+    }
+    if (record == nullptr) {
+        return;
+    }
+    if (opened_ship_id_ == ship_id && opened_message_id_ == message_id) {
+        QSize lightbox_bound = lb_lightbox_image_->size();
+        if (!lightbox_bound.isValid() || lightbox_bound.width() < 64 || lightbox_bound.height() < 64) {
+            lightbox_bound = QSize(1280, 720);
+        }
+        const QPixmap image = loadRecordImage(*record, lightbox_bound);
+        if (image.isNull()) {
+            lb_lightbox_image_->setPixmap(QPixmap());
+            lb_lightbox_image_->setText(store_.isFetching(ship_id, message_id) ? tr("下载中") : QString());
+        } else {
+            lb_lightbox_image_->setText(QString());
+            lb_lightbox_image_->setPixmap(image);
+        }
+        QStringList caption;
+        caption << resolvedShipName(store_, *record) << record->camera_name << record->position
+                << joinBehaviors(record->behaviors);
+        caption.removeAll(QString());
+        lb_lightbox_caption_->setText(caption.join(QStringLiteral("  ")));
+    }
+    if (strip_host_ == nullptr) {
+        return;
+    }
+    const QList<QFrame *> thumbs = strip_host_->findChildren<QFrame *>(QStringLiteral("behavior_strip_card"));
+    for (QFrame *thumb : thumbs) {
+        if (thumb->property("ship_id").toUInt() != ship_id
+            || thumb->property("message_id").toUInt() != message_id) {
+            continue;
+        }
+        auto *image_label = thumb->findChild<QLabel *>(QStringLiteral("behavior_strip_shot"));
+        if (image_label == nullptr) {
+            break;
+        }
+        const QPixmap thumb_image = loadRecordImage(*record, kStripThumbSize);
+        if (thumb_image.isNull()) {
+            image_label->setPixmap(QPixmap());
+            image_label->setText(store_.isFetching(ship_id, message_id) ? tr("下载中") : QString());
+        } else {
+            image_label->setText(QString());
+            image_label->setPixmap(thumb_image);
+        }
+        break;
+    }
 }
 }  // namespace shore_station::behavior_page

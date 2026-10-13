@@ -3,11 +3,9 @@
 
 #include "behavior_page_plugin.h"
 
-#include <QByteArray>
 #include <QVector>
 #include <QWidget>
 
-#include "behavior_codec.h"
 #include "behavior_page_widget.h"
 #include "behavior_store.h"
 #include "i_plugin_context.h"
@@ -73,7 +71,7 @@ plugin_sdk::PluginResult BehaviorPagePlugin::start()
         return plugin_sdk::PluginResult::failure(QStringLiteral("插件未初始化"));
     }
     store_->start();
-    context()->hczk().subscribe(*this);
+    context()->behaviorFeed().subscribe(*this);
     context()->log().info(descriptor().id, QStringLiteral("start"));
     return plugin_sdk::PluginResult::success();
 }
@@ -81,7 +79,7 @@ plugin_sdk::PluginResult BehaviorPagePlugin::start()
 void BehaviorPagePlugin::stop() noexcept
 {
     if (context() != nullptr) {
-        context()->hczk().unsubscribe(*this);
+        context()->behaviorFeed().unsubscribe(*this);
         context()->log().info(descriptor().id, QStringLiteral("stop"));
     }
     if (store_ != nullptr) {
@@ -97,6 +95,7 @@ plugin_sdk::PageDescriptor BehaviorPagePlugin::pageDescriptor() const
     plugin_sdk::PageDescriptor descriptor;
     descriptor.id = QStringLiteral("behavior.main");
     descriptor.title = tr("行为识别");
+    descriptor.icon = QStringLiteral("behavior_nav");
     return descriptor;
 }
 
@@ -117,23 +116,13 @@ QWidget *BehaviorPagePlugin::createPage(QWidget *parent)
     return page;
 }
 
-void BehaviorPagePlugin::onHczkPayload(quint16 cmd, quint32 send_id, const QByteArray &payload)
+void BehaviorPagePlugin::onBehaviorEvent(const plugin_sdk::BehaviorEvent &event)
 {
-    if (cmd != kHczkCmdBehaviorResult || store_ == nullptr) {
+    if (store_ == nullptr) {
         return;
     }
-    BehaviorFrame frame;
-    QString error;
-    if (!parseBehaviorPayload(payload, &frame, &error)) {
-        return;
-    }
-    frame.ship_id = send_id;
-    if (context() != nullptr) {
-        frame.ship_name = context()->shipName(send_id);
-    } else {
-        frame.ship_name = QString::number(send_id);
-    }
-    store_->ingest(frame);
+    store_->ingestHostEvent(event, context() != nullptr ? context()->shipName(event.ship_id)
+                                                        : QString::number(event.ship_id));
 }
 
 void BehaviorPagePlugin::onThemeChanged(const QString &theme)
